@@ -590,46 +590,42 @@ def render_input_to_file_silent(input_node, output_path, frame=None):
 
 
 def collect_input_images(node, temp_dir):
-    """
-    Collect all connected input images from the NanoBanana node.
-    Renders each input to the temp directory silently.
-    Naming: {generator_name}_input_{img1/img2/...}_frame{N}.png
+    """Collect connected input images from the NanoBanana node.
 
-    Index mapping (via explicit 'number' knob on Input nodes):
-      img1 = input 0 (number 0)
-      img2 = input 1 (number 1)
-      imgN = input N-1 (number N-1)
+    DAG layout:       img1(LEFT) ... imgN(RIGHT)
+    Input index map:  imgK -> input (num_inputs - K)
+                      img1 -> highest idx (leftmost in DAG)
+                      imgN  -> input 0 (rightmost in DAG)
+
+    We iterate by img number (1..N) for consistent API ordering.
     """
     inputs_info = []
-    render_frame = nuke.frame()  # Render from current timeline frame
-    gen_name = node.name()  # e.g. "NanoBanana_Generate1"
+    render_frame = nuke.frame()
+    gen_name = node.name()
     
-    # Get actual number of inputs on the node
     num_inputs = node.inputs()
     
-    print("[NanoBanana] collect_input_images: node='{}', num_inputs={}"
-          .format(gen_name, num_inputs))
+    print("[NanoBanana] collect: '{}' has {} inputs".format(gen_name, num_inputs))
     
-    for i in range(num_inputs):
-        input_node = node.input(i)
-        input_name = "img{}".format(i + 1)
+    for k in range(1, num_inputs + 1):
+        # imgK -> input (num_inputs - K)
+        input_idx = num_inputs - k
+        input_node = node.input(input_idx)
+        input_name = "img{}".format(k)
         
         info = {
-            "index": i,
+            "index": k - 1,  # 0-based for API
             "name": input_name,
             "path": None,
             "connected": input_node is not None,
             "node_name": input_node.name() if input_node else None
         }
         
-        print("[NanoBanana]   input({}) = {} -> node: {}".format(
-            i, input_name,
-            input_node.name() if input_node else "None"))
+        print("[NanoBanana]   img{} = input({}) <- {}"
+              .format(k, input_idx, input_node.name() if input_node else "None"))
         
         if input_node is not None:
-            filename = "{}_input_{}_frame{}.png".format(
-                gen_name, input_name, i + 1
-            )
+            filename = "{}_input_{}_frame{}.png".format(gen_name, input_name, k)
             output_path = os.path.join(temp_dir, filename)
             
             if render_input_to_file_silent(input_node, output_path, render_frame):
@@ -1717,7 +1713,11 @@ class NanoBananaWidget(QtWidgets.QWidget):
         worker.start()
 
     def _on_model_changed(self, index):
-        """When model selection changes, adjust the max input count on the node."""
+        """When model selection changes, adjust the max input count on the node.
+
+        If reducing, delete ALL Inputs and recreate in reverse order.
+        Mapping: imgK = input (max_inputs - K)
+        """
         model_id = self.model_combo.currentData()
         max_inputs = MODEL_MAX_INPUTS.get(model_id, MAX_INPUT_IMAGES)
 
@@ -1725,7 +1725,7 @@ class NanoBananaWidget(QtWidgets.QWidget):
         if not node or "nb_input_count" not in node.knobs():
             return
 
-        # Store the model's max limit on the node
+        # Store the model's max limit
         if "nb_max_inputs" not in node.knobs():
             k = nuke.Int_Knob("nb_max_inputs", "Max Inputs")
             k.setVisible(False)
@@ -1734,43 +1734,53 @@ class NanoBananaWidget(QtWidgets.QWidget):
 
         current_count = int(node["nb_input_count"].value())
 
-        # Remove excess inputs if current count exceeds new max
         if current_count > max_inputs:
             global _expanding_inputs
             _expanding_inputs = True
             try:
-                print("[NanoBanana] _on_model_changed: reducing inputs from {} to {}"
+                print("[NanoBanana] _onModel: reduce {} -> {}"
                       .format(current_count, max_inputs))
 
-                # Save connections for img1..max_inputs
-                # imgK = input (K-1) via number knob
-                saved_connections = {}
+                # Save: imgK = input (current_count - K)
+                saved = {}
                 for k in range(1, max_inputs + 1):
-                    conn = node.input(k - 1)
+                    old_idx = current_count - k
+                    conn = node.input(old_idx)
                     if conn is not None:
-                        saved_connections[k] = conn
+                        saved[k] = conn
+                        print("[NanoBanana]   save: img{} <- '{}'"
+                              .format(k, conn.name()))
 
-                # Delete all Input nodes
+                # Delete all
                 node.begin()
-                for inp_node in list(nuke.allNodes("Input")):
-                    nuke.delete(inp_node)
+                for inp in list(nuke.allNodes("Input")):
+                    nuke.delete(inp)
                 node.end()
 
-                # Recreate with explicit number knobs
+                # Recreate reverse + number knob
                 node.begin()
-                for i in range(1, max_inputs + 1):
+                for i in range(max_inputs, 0, -1):
                     inp = nuke.nodes.Input()
                     inp.setName("img{}".format(i))
-                    inp["number"].setValue(i - 1)
+                    inp["number"].setValue(max_inputs - i)  # imgK -> (count-K)
                     inp["xpos"].setValue((i - 1) * 100)
                     inp["ypos"].setValue(0)
-                    print("[NanoBanana]   recreated '{}' with number={}"
-                          .format(inp.name(), i - 1))
+                    print("[NanoBanana]   create: '{}' num={} #{}"
+                          .format(inp.name(), max_inputs - i,
+                                  max_inputs - i + 1))
                 node.end()
 
-                # Restore connections: imgK = input (K-1)
-                for k, conn_node in saved_connections.items():
-                    node.setInput(k - 1, conn_node)
+                # Restore: imgK = input (max_inputs - K)
+                set_indices = set()
+                for k, conn_node in saved.items():
+                    new_idx = max_inputs - k
+                    node.setInput(new_idx, conn_node)
+                    set_indices.add(new_idx)
+
+                # Clear any auto-filled indices (Nuke setInput fills 0..N-1)
+                for i in range(max_inputs):
+                    if i not in set_indices:
+                        node.setInput(i, None)
 
                 node["nb_input_count"].setValue(max_inputs)
             finally:
@@ -2396,42 +2406,50 @@ class NanoBananaWorker(QtCore.QThread):
 # Node Creation Functions
 # ---------------------------------------------------------------------------
 def _create_group_inputs(group_node, count):
-    """Create Input nodes inside a Group with explicit 'number' knob control.
+    """Create Input nodes inside a Group.
 
-    Each Input node has a hidden 'number' knob that determines its input index
-    on the Group node. By setting this explicitly, we guarantee stable ordering
-    regardless of creation order, node moves, or reconnections.
+    TWO mechanisms work together for user's desired layout:
 
-    Mapping:
-      img1 -> number 0 (input 0)
-      img2 -> number 1 (input 1)
-      ...
-      imgN -> number (N-1) (input N-1)
+      DAG display:  img1(LEFT)  img2  ...  imgN(RIGHT)
 
-    In Nuke's DAG display:
-      number 0 = rightmost pipe
-      higher numbers = further left
-    So the visual order is:  imgN(left) ... img2  img1(right)
+    1) CREATION ORDER controls DAG visual position:
+       Nuke: first-created Input = RIGHTmost, each new one goes LEFT.
+       So we CREATE in REVERSE order (imgN first -> right, img1 last -> left).
+
+    2) 'number' KNOB controls input index (connection):
+       Nuke: higher number = MORE LEFT in DAG.
+       We want img1 on the LEFT, so img1 gets the HIGHEST number.
+       Mapping:  imgK -> number = (count - K)
+
+    Summary table (for count=3):
+      Name   | Created   | number | input idx | DAG pos
+      ------ | --------- | ------ | --------- | --------
+      img3   | 1st (→right) | 0     | 0         | RIGHTMOST
+      img2   | 2nd         | 1     | 1         | middle
+      img1   | 3rd (→left) | 2     | 2         | LEFTMOST
     """
     group_node.begin()
-    for i in range(1, count + 1):
+    # Reverse creation order: imgN first (rightmost), img1 last (leftmost)
+    for i in range(count, 0, -1):
         inp = nuke.nodes.Input()
         inp.setName("img{}".format(i))
-        # Explicitly set the hidden 'number' knob to control input index
-        inp["number"].setValue(i - 1)
+        # imgK gets number (count-K): img1=highest=leftmost, imgN=0=rightmost
+        inp["number"].setValue(count - i)
+        # xpos: img1 at left (0), imgN at right ((count-1)*100)
         inp["xpos"].setValue((i - 1) * 100)
         inp["ypos"].setValue(0)
-        print("[NanoBanana] _create_group_inputs: created '{}' with number={}"
-              .format(inp.name(), int(inp["number"].value())))
+        print("[NanoBanana] _create: '{}' number={} created_#{}"
+              .format(inp.name(), int(inp["number"].value()),
+                      count - i + 1))
     
     out = nuke.nodes.Output()
     out["xpos"].setValue(0)
     out["ypos"].setValue(200)
     group_node.end()
     
-    # Debug: verify the input mapping from outside
+    # Debug verify
     for idx in range(count):
-        print("[NanoBanana] _create_group_inputs: group_node.input({}) -> {}"
+        print("[NanoBanana] _create: verify input({}) -> {}"
               .format(idx, group_node.input(idx)))
 
 
@@ -2440,10 +2458,14 @@ def create_nanobanana_node():
 
     - No nodes selected  -> start with 1 input  (img1 only)
     - 1+ nodes selected  -> start with 2 inputs (img1, img2)
+      (selected node is NOT auto-connected to avoid Nuke auto-fill
+       which would trigger immediate expansion)
+
     Auto-expands up to MAX_INPUT_IMAGES when all inputs are connected.
 
-    Input mapping (via explicit 'number' knob):
-      img1 = input 0, img2 = input 1, ... imgN = input (N-1)
+    DAG layout:       img1(LEFT)  img2  ...  imgN(RIGHT)
+    Input mapping:     imgK = input index (count - K)
+                       img1 = input(count-1) [leftmost, highest number]
     """
     sel = nuke.selectedNodes()
     sel_node = sel[0] if sel else None
@@ -2455,20 +2477,22 @@ def create_nanobanana_node():
     group_node.setName("NanoBanana_Generate")
     group_node["tile_color"].setValue(0x3CB371FF)  # Green
 
+    # Position below selected node (if any), or use default
     if sel_node:
         sx = int(sel_node["xpos"].value())
         sy = int(sel_node["ypos"].value())
         group_node["xpos"].setValue(sx)
         group_node["ypos"].setValue(sy + 100)
+        print("[NanoBanana] create: positioned under '{}' (selected but not auto-connected)"
+              .format(sel_node.name()))
 
-    # Build internal Input / Output nodes (with explicit number knobs)
+    # Build internal Input / Output nodes (reverse creation + explicit number)
     _create_group_inputs(group_node, initial_inputs)
 
-    # Connect selected node to img1 (= input 0, number knob 0).
-    if sel_node:
-        group_node.setInput(0, sel_node)
-        print("[NanoBanana] create_nanobanana_node: connected '{}' to input 0 (img1)"
-              .format(sel_node.name()))
+    # NOTE: We do NOT call setInput() here because Nuke auto-fills lower inputs,
+    # which would make all_connected=True immediately and trigger infinite expansion.
+    # Users connect manually by dragging pipes in the DAG.
+    # Each pipe shows its label (img1, img2, ...) so users know where to connect.
 
     # Add our custom NanoBanana tab FIRST (so no "User" tab is auto-created)
     tab = nuke.Tab_Knob("nanobanana_tab", "NanoBanana")
@@ -2502,11 +2526,16 @@ _expanding_inputs = False  # Guard against recursive knobChanged callbacks
 def _nanobanana_input_changed():
     """Callback: auto-expand Group inputs when all current inputs are connected.
 
-    Uses the explicit 'number' knob on Input nodes to guarantee stable ordering.
-    When expanding, we simply append a new Input with the correct number,
-    no need to delete/recreate existing ones.
+    Target DAG:  img1(LEFT)  ...  imgN(RIGHT)
+    Mapping:     imgK = input index (new_count - K)
 
-    Mapping: imgK = number (K-1) = input index (K-1)
+    Steps:
+      1. Save connections: imgK -> node.input(current_count - K)
+      2. Delete ALL Input nodes
+      3. Recreate in reverse order with number knobs:
+           img(N+1) first (rightmost), ..., img1 last (leftmost)
+           each gets number = new_count - K
+      4. Restore connections via new mapping
     """
     global _expanding_inputs
     if _expanding_inputs:
@@ -2530,15 +2559,15 @@ def _nanobanana_input_changed():
     if current_count >= max_allowed:
         return
     
-    # Debug: log current state
-    print("[NanoBanana] _input_changed: node='{}', current_count={}, max_allowed={}"
+    # Debug log
+    print("[NanoBanana] _input_changed: '{}' count={}/max={}"
           .format(node.name(), current_count, max_allowed))
     for i in range(current_count):
         conn = node.input(i)
-        print("[NanoBanana]   input({}) -> {}".format(
-            i, conn.name() if conn else "None"))
+        print("[NanoBanana]   input({}) <- {}"
+              .format(i, conn.name() if conn else "None"))
 
-    # Check if all current inputs are connected
+    # Check if all connected
     all_connected = True
     for i in range(current_count):
         if node.input(i) is None:
@@ -2548,39 +2577,73 @@ def _nanobanana_input_changed():
     if all_connected:
         _expanding_inputs = True
         try:
-            new_img_num = current_count + 1
-            new_number = current_count  # number knob = img_num - 1
+            new_count = current_count + 1
+            print("[NanoBanana]   EXPAND {} -> {}".format(current_count, new_count))
 
-            print("[NanoBanana] _input_changed: expanding! adding img{} with number={}"
-                  .format(new_img_num, new_number))
+            # --- Step 1: Save connections ---
+            # Old mapping: imgK = input (current_count - K)
+            saved = {}
+            for k in range(1, current_count + 1):
+                old_idx = current_count - k
+                conn = node.input(old_idx)
+                if conn is not None:
+                    saved[k] = conn
+                    print("[NanoBanana]   save: img{} <- '{}'"
+                          .format(k, conn.name()))
 
+            # --- Step 2: Delete all Inputs ---
             node.begin()
-            new_inp = nuke.nodes.Input()
-            new_inp.setName("img{}".format(new_img_num))
-            # Explicitly set the number knob to control input index
-            new_inp["number"].setValue(new_number)
-            new_inp["xpos"].setValue(new_number * 100)
-            new_inp["ypos"].setValue(0)
-            print("[NanoBanana]   created '{}' with number={}"
-                  .format(new_inp.name(), int(new_inp["number"].value())))
+            del_names = [n.name() for n in nuke.allNodes("Input")]
+            for inp in list(nuke.allNodes("Input")):
+                nuke.delete(inp)
+            node.end()
+            print("[NanoBanana]   delete: {}".format(del_names))
+
+            # --- Step 3: Recreate reverse order + number knob ---
+            # imgK -> number = (new_count - K): img1=highest=leftmost
+            node.begin()
+            for i in range(new_count, 0, -1):
+                inp = nuke.nodes.Input()
+                inp.setName("img{}".format(i))
+                inp["number"].setValue(new_count - i)
+                inp["xpos"].setValue((i - 1) * 100)
+                inp["ypos"].setValue(0)
+                print("[NanoBanana]   create: '{}' num={} #{}"
+                      .format(inp.name(), int(inp["number"].value()),
+                              new_count - i + 1))
             node.end()
 
-            node["nb_input_count"].setValue(new_img_num)
+            # --- Step 4: Restore ---
+            # New mapping: imgK = input (new_count - K)
+            # Track which indices we intentionally set
+            set_indices = set()
+            for k, conn_node in saved.items():
+                new_idx = new_count - k
+                node.setInput(new_idx, conn_node)
+                set_indices.add(new_idx)
+                print("[NanoBanana]   restore: img{} <- input {} ('{}')"
+                      .format(k, new_idx, conn_node.name()))
 
-            # Debug: verify after expansion
-            print("[NanoBanana] _input_changed: after expansion, {} inputs:"
-                  .format(new_img_num))
-            for i in range(new_img_num):
-                conn = node.input(i)
-                print("[NanoBanana]   input({}) -> {}".format(
-                    i, conn.name() if conn else "None"))
+            # --- Step 5: Clear auto-filled inputs ---
+            # Nuke's setInput(N, node) auto-fills indices 0..N-1 with same node.
+            # Clear any index that we didn't explicitly set above.
+            for i in range(new_count):
+                if i not in set_indices:
+                    print("[NanoBanana]   clear auto-fill: input({})".format(i))
+                    node.setInput(i, None)
 
-            # Debug: verify internal Input nodes
+            node["nb_input_count"].setValue(new_count)
+
+            # Verify
+            print("[NanoBanana]   AFTER ({} inputs):".format(new_count))
+            for i in range(new_count):
+                c = node.input(i)
+                print("[NanoBanana]     input({}) <- {}".format(
+                    i, c.name() if c else "None"))
             node.begin()
-            for inp_node in nuke.allNodes("Input"):
-                print("[NanoBanana]   internal Input '{}' number={}"
-                      .format(inp_node.name(),
-                              int(inp_node["number"].value())))
+            for inp in nuke.allNodes("Input"):
+                print("[NanoBanana]     internal '{}' number={}"
+                      .format(inp.name(), int(inp["number"].value())))
             node.end()
         finally:
             _expanding_inputs = False
