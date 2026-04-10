@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Nuke / IDE
+tab_stats.dat
+
+# Dependencies (too large, use requirements.txt to reinstall)
+site-packages/
+.venv/
+venv/
+
+# Temp files (auto-generated)
+temp/
+temp_*/
+
+# Archives
+*.7z
+*.zip
+*.rar
+
+# OS
+Thumbs.db
+.DS_Store
+*.swp
+*.swo
+
+# CodeBuddy internal data (keep)
+# .codebuddy/
