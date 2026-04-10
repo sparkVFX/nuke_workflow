@@ -2477,7 +2477,7 @@ def create_nanobanana_node():
     group_node.setName("NanoBanana_Generate")
     group_node["tile_color"].setValue(0x3CB371FF)  # Green
 
-    # Position below selected node (if any), or use default
+    # Position below selected node, or at DAG viewport center
     if sel_node:
         sx = int(sel_node["xpos"].value())
         sy = int(sel_node["ypos"].value())
@@ -2485,6 +2485,18 @@ def create_nanobanana_node():
         group_node["ypos"].setValue(sy + 100)
         print("[NanoBanana] create: positioned under '{}' (selected but not auto-connected)"
               .format(sel_node.name()))
+    else:
+        # No selection — place at the center of the current DAG viewport
+        # nuke.center() returns [x, y] in DAG scene coordinates
+        try:
+            center = nuke.center()
+            x, y = int(center[0]), int(center[1])
+        except Exception:
+            x, y = 0, 0
+        group_node["xpos"].setValue(x)
+        group_node["ypos"].setValue(y)
+        print("[NanoBanana] create: positioned at DAG viewport center ({}, {})"
+              .format(x, y))
 
     # Build internal Input / Output nodes (reverse creation + explicit number)
     _create_group_inputs(group_node, initial_inputs)
@@ -2647,6 +2659,10 @@ def _nanobanana_input_changed():
             node.end()
         finally:
             _expanding_inputs = False
+
+
+
+
 
 
 # Register the callback for auto-expanding inputs
