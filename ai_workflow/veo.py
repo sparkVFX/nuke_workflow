@@ -2238,6 +2238,14 @@ def create_veo_node():
         sy = int(ref_node["ypos"].value())
         group_node["xpos"].setValue(sx)
         group_node["ypos"].setValue(sy + 100)
+    else:
+        try:
+            center = nuke.center()
+            x, y = int(center[0]), int(center[1])
+        except Exception:
+            x, y = 0, 0
+        group_node["xpos"].setValue(x)
+        group_node["ypos"].setValue(y)
 
     # Build internal structure
     group_node.begin()

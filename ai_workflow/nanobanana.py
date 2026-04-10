@@ -2457,9 +2457,7 @@ def create_nanobanana_node():
     """Create a NanoBanana_Generate node with multiple inputs using Group.
 
     - No nodes selected  -> start with 1 input  (img1 only)
-    - 1+ nodes selected  -> start with 2 inputs (img1, img2)
-      (selected node is NOT auto-connected to avoid Nuke auto-fill
-       which would trigger immediate expansion)
+    - 1+ nodes selected  -> start with 1 input (img1), auto-connect selected node to img1
 
     Auto-expands up to MAX_INPUT_IMAGES when all inputs are connected.
 
@@ -2470,8 +2468,8 @@ def create_nanobanana_node():
     sel = nuke.selectedNodes()
     sel_node = sel[0] if sel else None
 
-    # If nothing selected, start with just 1 input; otherwise 2
-    initial_inputs = 1 if sel_node is None else 2
+    # Always start with 1 input; if node selected, connect it to img1 after creation
+    initial_inputs = 1
 
     group_node = nuke.nodes.Group()
     group_node.setName("NanoBanana_Generate")
@@ -2483,11 +2481,8 @@ def create_nanobanana_node():
         sy = int(sel_node["ypos"].value())
         group_node["xpos"].setValue(sx)
         group_node["ypos"].setValue(sy + 100)
-        print("[NanoBanana] create: positioned under '{}' (selected but not auto-connected)"
-              .format(sel_node.name()))
+        print("[NanoBanana] create: positioned under '{}'".format(sel_node.name()))
     else:
-        # No selection — place at the center of the current DAG viewport
-        # nuke.center() returns [x, y] in DAG scene coordinates
         try:
             center = nuke.center()
             x, y = int(center[0]), int(center[1])
@@ -2501,10 +2496,12 @@ def create_nanobanana_node():
     # Build internal Input / Output nodes (reverse creation + explicit number)
     _create_group_inputs(group_node, initial_inputs)
 
-    # NOTE: We do NOT call setInput() here because Nuke auto-fills lower inputs,
-    # which would make all_connected=True immediately and trigger infinite expansion.
-    # Users connect manually by dragging pipes in the DAG.
-    # Each pipe shows its label (img1, img2, ...) so users know where to connect.
+    # Auto-connect selected node to img1 (input index = count - 1 = 0 for count=1)
+    if sel_node:
+        img1_idx = initial_inputs - 1  # img1 maps to input(0) when count=1
+        group_node.setInput(img1_idx, sel_node)
+        print("[NanoBanana] create: connected '{}' -> img1 (input{})"
+              .format(sel_node.name(), img1_idx))
 
     # Add our custom NanoBanana tab FIRST (so no "User" tab is auto-created)
     tab = nuke.Tab_Knob("nanobanana_tab", "NanoBanana")
