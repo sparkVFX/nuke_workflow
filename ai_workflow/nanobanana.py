@@ -593,7 +593,12 @@ def collect_input_images(node, temp_dir):
     """
     Collect all connected input images from the NanoBanana node.
     Renders each input to the temp directory silently.
-    Naming: {generator_name}_input_{A/A1/...}_frame{N}.png
+    Naming: {generator_name}_input_{img1/img2/...}_frame{N}.png
+
+    Index mapping (via explicit 'number' knob on Input nodes):
+      img1 = input 0 (number 0)
+      img2 = input 1 (number 1)
+      imgN = input N-1 (number N-1)
     """
     inputs_info = []
     render_frame = nuke.frame()  # Render from current timeline frame
@@ -601,6 +606,9 @@ def collect_input_images(node, temp_dir):
     
     # Get actual number of inputs on the node
     num_inputs = node.inputs()
+    
+    print("[NanoBanana] collect_input_images: node='{}', num_inputs={}"
+          .format(gen_name, num_inputs))
     
     for i in range(num_inputs):
         input_node = node.input(i)
@@ -614,8 +622,11 @@ def collect_input_images(node, temp_dir):
             "node_name": input_node.name() if input_node else None
         }
         
+        print("[NanoBanana]   input({}) = {} -> node: {}".format(
+            i, input_name,
+            input_node.name() if input_node else "None"))
+        
         if input_node is not None:
-            # Name files as frame1/frame2/frame3 (not based on Nuke timeline frame)
             filename = "{}_input_{}_frame{}.png".format(
                 gen_name, input_name, i + 1
             )
@@ -1725,22 +1736,45 @@ class NanoBananaWidget(QtWidgets.QWidget):
 
         # Remove excess inputs if current count exceeds new max
         if current_count > max_inputs:
-            node.begin()
-            # Find and remove extra Input nodes inside the group
-            all_nodes = nuke.allNodes("Input")
-            # Sort by index (img number)
-            input_nodes_sorted = sorted(all_nodes, key=lambda n: n.name())
-            for inp_node in input_nodes_sorted:
-                name = inp_node.name()
-                # Extract number from "img5" -> 5
-                try:
-                    num = int(name.replace("img", ""))
-                except ValueError:
-                    continue
-                if num > max_inputs:
+            global _expanding_inputs
+            _expanding_inputs = True
+            try:
+                print("[NanoBanana] _on_model_changed: reducing inputs from {} to {}"
+                      .format(current_count, max_inputs))
+
+                # Save connections for img1..max_inputs
+                # imgK = input (K-1) via number knob
+                saved_connections = {}
+                for k in range(1, max_inputs + 1):
+                    conn = node.input(k - 1)
+                    if conn is not None:
+                        saved_connections[k] = conn
+
+                # Delete all Input nodes
+                node.begin()
+                for inp_node in list(nuke.allNodes("Input")):
                     nuke.delete(inp_node)
-            node.end()
-            node["nb_input_count"].setValue(max_inputs)
+                node.end()
+
+                # Recreate with explicit number knobs
+                node.begin()
+                for i in range(1, max_inputs + 1):
+                    inp = nuke.nodes.Input()
+                    inp.setName("img{}".format(i))
+                    inp["number"].setValue(i - 1)
+                    inp["xpos"].setValue((i - 1) * 100)
+                    inp["ypos"].setValue(0)
+                    print("[NanoBanana]   recreated '{}' with number={}"
+                          .format(inp.name(), i - 1))
+                node.end()
+
+                # Restore connections: imgK = input (K-1)
+                for k, conn_node in saved_connections.items():
+                    node.setInput(k - 1, conn_node)
+
+                node["nb_input_count"].setValue(max_inputs)
+            finally:
+                _expanding_inputs = False
 
     def _toggle_stop_ui(self, is_running):
         if is_running:
@@ -2361,14 +2395,61 @@ class NanoBananaWorker(QtCore.QThread):
 # ---------------------------------------------------------------------------
 # Node Creation Functions
 # ---------------------------------------------------------------------------
+def _create_group_inputs(group_node, count):
+    """Create Input nodes inside a Group with explicit 'number' knob control.
+
+    Each Input node has a hidden 'number' knob that determines its input index
+    on the Group node. By setting this explicitly, we guarantee stable ordering
+    regardless of creation order, node moves, or reconnections.
+
+    Mapping:
+      img1 -> number 0 (input 0)
+      img2 -> number 1 (input 1)
+      ...
+      imgN -> number (N-1) (input N-1)
+
+    In Nuke's DAG display:
+      number 0 = rightmost pipe
+      higher numbers = further left
+    So the visual order is:  imgN(left) ... img2  img1(right)
+    """
+    group_node.begin()
+    for i in range(1, count + 1):
+        inp = nuke.nodes.Input()
+        inp.setName("img{}".format(i))
+        # Explicitly set the hidden 'number' knob to control input index
+        inp["number"].setValue(i - 1)
+        inp["xpos"].setValue((i - 1) * 100)
+        inp["ypos"].setValue(0)
+        print("[NanoBanana] _create_group_inputs: created '{}' with number={}"
+              .format(inp.name(), int(inp["number"].value())))
+    
+    out = nuke.nodes.Output()
+    out["xpos"].setValue(0)
+    out["ypos"].setValue(200)
+    group_node.end()
+    
+    # Debug: verify the input mapping from outside
+    for idx in range(count):
+        print("[NanoBanana] _create_group_inputs: group_node.input({}) -> {}"
+              .format(idx, group_node.input(idx)))
+
+
 def create_nanobanana_node():
     """Create a NanoBanana_Generate node with multiple inputs using Group.
-    Starts with 2 inputs (img1, img2), auto-expands up to 14 when all are connected."""
-    # Position below the selected node if any
+
+    - No nodes selected  -> start with 1 input  (img1 only)
+    - 1+ nodes selected  -> start with 2 inputs (img1, img2)
+    Auto-expands up to MAX_INPUT_IMAGES when all inputs are connected.
+
+    Input mapping (via explicit 'number' knob):
+      img1 = input 0, img2 = input 1, ... imgN = input (N-1)
+    """
     sel = nuke.selectedNodes()
     sel_node = sel[0] if sel else None
 
-    DEFAULT_INPUTS = 2  # Start with 2 inputs, auto-expand up to MAX_INPUT_IMAGES
+    # If nothing selected, start with just 1 input; otherwise 2
+    initial_inputs = 1 if sel_node is None else 2
 
     group_node = nuke.nodes.Group()
     group_node.setName("NanoBanana_Generate")
@@ -2379,28 +2460,15 @@ def create_nanobanana_node():
         sy = int(sel_node["ypos"].value())
         group_node["xpos"].setValue(sx)
         group_node["ypos"].setValue(sy + 100)
-    
-    # Start with only 2 inputs: img1, img2
-    group_node.begin()
-    
-    inputs = []
-    for i in range(DEFAULT_INPUTS):
-        inp = nuke.nodes.Input()
-        inp.setName("img{}".format(i + 1))
-        inp["xpos"].setValue(i * 100)
-        inp["ypos"].setValue(0)
-        inputs.append(inp)
-    
-    out = nuke.nodes.Output()
-    out["xpos"].setValue(0)
-    out["ypos"].setValue(200)
-    out.setInput(0, inputs[0])
-    
-    group_node.end()
 
-    # Connect to selected node
+    # Build internal Input / Output nodes (with explicit number knobs)
+    _create_group_inputs(group_node, initial_inputs)
+
+    # Connect selected node to img1 (= input 0, number knob 0).
     if sel_node:
         group_node.setInput(0, sel_node)
+        print("[NanoBanana] create_nanobanana_node: connected '{}' to input 0 (img1)"
+              .format(sel_node.name()))
 
     # Add our custom NanoBanana tab FIRST (so no "User" tab is auto-created)
     tab = nuke.Tab_Knob("nanobanana_tab", "NanoBanana")
@@ -2415,7 +2483,7 @@ def create_nanobanana_node():
 
     # Track current input count for auto-expansion (hidden, under NanoBanana tab)
     count_knob = nuke.Int_Knob("nb_input_count", "Input Count")
-    count_knob.setValue(DEFAULT_INPUTS)
+    count_knob.setValue(initial_inputs)
     count_knob.setVisible(False)
     group_node.addKnob(count_knob)
 
@@ -2428,8 +2496,22 @@ def create_nanobanana_node():
     return group_node
 
 
+_expanding_inputs = False  # Guard against recursive knobChanged callbacks
+
+
 def _nanobanana_input_changed():
-    """Callback: auto-expand Group inputs when all current inputs are connected."""
+    """Callback: auto-expand Group inputs when all current inputs are connected.
+
+    Uses the explicit 'number' knob on Input nodes to guarantee stable ordering.
+    When expanding, we simply append a new Input with the correct number,
+    no need to delete/recreate existing ones.
+
+    Mapping: imgK = number (K-1) = input index (K-1)
+    """
+    global _expanding_inputs
+    if _expanding_inputs:
+        return
+
     node = nuke.thisNode()
     if not node.name().startswith("NanoBanana_Generate"):
         return
@@ -2448,23 +2530,60 @@ def _nanobanana_input_changed():
     if current_count >= max_allowed:
         return
     
+    # Debug: log current state
+    print("[NanoBanana] _input_changed: node='{}', current_count={}, max_allowed={}"
+          .format(node.name(), current_count, max_allowed))
+    for i in range(current_count):
+        conn = node.input(i)
+        print("[NanoBanana]   input({}) -> {}".format(
+            i, conn.name() if conn else "None"))
+
     # Check if all current inputs are connected
     all_connected = True
-    for i in range(int(current_count)):
+    for i in range(current_count):
         if node.input(i) is None:
             all_connected = False
             break
     
     if all_connected:
-        # Add a new input inside the group
-        new_idx = int(current_count)
-        node.begin()
-        new_inp = nuke.nodes.Input()
-        new_inp.setName("img{}".format(new_idx + 1))
-        new_inp["xpos"].setValue(new_idx * 100)
-        new_inp["ypos"].setValue(0)
-        node.end()
-        node["nb_input_count"].setValue(new_idx + 1)
+        _expanding_inputs = True
+        try:
+            new_img_num = current_count + 1
+            new_number = current_count  # number knob = img_num - 1
+
+            print("[NanoBanana] _input_changed: expanding! adding img{} with number={}"
+                  .format(new_img_num, new_number))
+
+            node.begin()
+            new_inp = nuke.nodes.Input()
+            new_inp.setName("img{}".format(new_img_num))
+            # Explicitly set the number knob to control input index
+            new_inp["number"].setValue(new_number)
+            new_inp["xpos"].setValue(new_number * 100)
+            new_inp["ypos"].setValue(0)
+            print("[NanoBanana]   created '{}' with number={}"
+                  .format(new_inp.name(), int(new_inp["number"].value())))
+            node.end()
+
+            node["nb_input_count"].setValue(new_img_num)
+
+            # Debug: verify after expansion
+            print("[NanoBanana] _input_changed: after expansion, {} inputs:"
+                  .format(new_img_num))
+            for i in range(new_img_num):
+                conn = node.input(i)
+                print("[NanoBanana]   input({}) -> {}".format(
+                    i, conn.name() if conn else "None"))
+
+            # Debug: verify internal Input nodes
+            node.begin()
+            for inp_node in nuke.allNodes("Input"):
+                print("[NanoBanana]   internal Input '{}' number={}"
+                      .format(inp_node.name(),
+                              int(inp_node["number"].value())))
+            node.end()
+        finally:
+            _expanding_inputs = False
 
 
 # Register the callback for auto-expanding inputs
