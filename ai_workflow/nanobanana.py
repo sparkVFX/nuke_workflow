@@ -358,11 +358,26 @@ class NanoBananaSettingsDialog(QtWidgets.QDialog):
         api_label.setStyleSheet("color: #aaa; font-size: 11px;")
         api_layout.addWidget(api_label)
         
+        api_row = QtWidgets.QHBoxLayout()
         self.api_key_input = QtWidgets.QLineEdit()
         self.api_key_input.setPlaceholderText("Enter your Gemini API key here...")
         self.api_key_input.setEchoMode(QtWidgets.QLineEdit.Password)
         self.api_key_input.setText(self.settings.api_key)
-        api_layout.addWidget(self.api_key_input)
+        api_row.addWidget(self.api_key_input)
+
+        self.test_api_btn = QtWidgets.QPushButton("Test")
+        self.test_api_btn.setObjectName("secondaryBtn")
+        self.test_api_btn.setFixedWidth(60)
+        self.test_api_btn.clicked.connect(self._test_api_key)
+        api_row.addWidget(self.test_api_btn)
+
+        api_layout.addLayout(api_row)
+
+        # Status label for test result
+        self.api_test_label = QtWidgets.QLabel()
+        self.api_test_label.setStyleSheet("color: #666; font-size: 10px;")
+        self.api_test_label.setWordWrap(True)
+        api_layout.addWidget(self.api_test_label)
         
         # Show/Hide API key checkbox
         self.show_api_chk = QtWidgets.QCheckBox("Show API Key")
@@ -431,6 +446,44 @@ class NanoBananaSettingsDialog(QtWidgets.QDialog):
             self.api_key_input.setEchoMode(QtWidgets.QLineEdit.Normal)
         else:
             self.api_key_input.setEchoMode(QtWidgets.QLineEdit.Password)
+
+    def _test_api_key(self):
+        """Test if the current API key is valid by calling the Gemini models endpoint."""
+        from google import genai
+        api_key = self.api_key_input.text().strip()
+
+        if not api_key:
+            self.api_test_label.setText("Please enter an API key first.")
+            self.api_test_label.setStyleSheet("color: #f87171; font-size: 10px;")
+            return
+
+        self.test_api_btn.setEnabled(False)
+        self.test_api_btn.setText("Testing...")
+        self.api_test_label.setText("Validating API key...")
+        self.api_test_label.setStyleSheet("color: #fbbf24; font-size: 10px;")
+        QtWidgets.QApplication.processEvents()
+
+        try:
+            client = genai.Client(api_key=api_key)
+            # List available models to validate the key (lightweight call)
+            models = client.models.list()
+            model_count = len(list(models))
+            self.api_test_label.setText(
+                "API Key is valid! Found {} available model(s).".format(model_count))
+            self.api_test_label.setStyleSheet("color: #4ade80; font-size: 10px;")
+        except Exception as e:
+            err_msg = str(e)
+            if "401" in err_msg or "API_KEY" in err_msg or "permission" in err_msg.lower():
+                display = "Invalid API Key. Please check and try again."
+            elif "connection" in err_msg.lower() or "network" in err_msg.lower():
+                display = "Network error. Please check your internet connection."
+            else:
+                display = "Error: {}".format(err_msg[:100])
+            self.api_test_label.setText(display)
+            self.api_test_label.setStyleSheet("color: #f87171; font-size: 10px;")
+        finally:
+            self.test_api_btn.setEnabled(True)
+            self.test_api_btn.setText("Test")
     
     def _browse_temp_dir(self):
         dir_path = QtWidgets.QFileDialog.getExistingDirectory(
