@@ -153,6 +153,14 @@ if exist "%NUKE_DIR%\menu.py" (
     echo %BEGIN_MARKER%
     echo import ai_workflow.toolbar
     echo ai_workflow.toolbar.register_toolbar^(^)
+    echo try:
+    echo     import ai_workflow.gemini_chat; ai_workflow.gemini_chat.register_gemini_panel^(^)
+    echo except Exception:
+    echo     pass
+    echo try:
+    echo     import ai_workflow.status_bar; ai_workflow.status_bar.deferred_install^(^)
+    echo except Exception:
+    echo     pass
     echo %END_MARKER%
 )
 

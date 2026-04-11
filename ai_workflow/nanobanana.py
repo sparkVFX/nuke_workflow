@@ -1644,6 +1644,11 @@ class NanoBananaWidget(QtWidgets.QWidget):
         # Capture references for closures so they don't depend on self
         widget_ref = self
 
+        # --- Register task in global status bar progress manager ---
+        from ai_workflow.status_bar import task_progress_manager
+        status_task_id = task_progress_manager.add_task(
+            node.name() if node else "NanoBanana", "image")
+
         # ---- Direct callbacks (called from Worker.run() in background thread) ----
         # These are NOT Qt signal slots – they are plain Python function calls made
         # directly by the worker thread.  They are immune to Qt signal disconnection
@@ -1651,12 +1656,16 @@ class NanoBananaWidget(QtWidgets.QWidget):
 
         def _direct_on_finished(path, metadata):
             """Direct callback from worker thread – always fires."""
+            # Update global status bar
+            s = metadata.get("seed", "N/A")
+            task_progress_manager.complete_task(
+                status_task_id, "Done! Seed: {}".format(s))
+
             # UI updates (safe to skip if widget is gone)
             def _update_ui():
                 try:
                     if _isValid(widget_ref):
                         widget_ref._toggle_stop_ui(False)
-                        s = metadata.get("seed", "N/A")
                         widget_ref.status_label.setStyleSheet("color: #3CB371; font-size: 11px;")
                         widget_ref.status_label.setText("Done! Seed: {}".format(s))
                 except Exception:
@@ -1705,6 +1714,9 @@ class NanoBananaWidget(QtWidgets.QWidget):
 
         def _direct_on_error(err):
             """Direct callback from worker thread – always fires."""
+            # Update global status bar
+            task_progress_manager.error_task(status_task_id, str(err)[:80])
+
             def _update_ui():
                 try:
                     if _isValid(widget_ref):
@@ -1724,6 +1736,9 @@ class NanoBananaWidget(QtWidgets.QWidget):
         # Signal connections kept for UI updates while widget is alive
         worker.status_update.connect(
             lambda s: widget_ref.status_label.setText(s) if _isValid(widget_ref) else None)
+        # Also update global status bar from status_update signal
+        worker.status_update.connect(
+            lambda s: task_progress_manager.update_status(status_task_id, s))
         worker.start()
 
     def _on_model_changed(self, index):

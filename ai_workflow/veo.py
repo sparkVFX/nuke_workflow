@@ -1641,6 +1641,11 @@ class VeoWidget(QtWidgets.QWidget):
         # Capture references for closures so they don't depend on self
         widget_ref = self
 
+        # --- Register task in global status bar progress manager ---
+        from ai_workflow.status_bar import task_progress_manager
+        status_task_id = task_progress_manager.add_task(
+            gen_name, "video")
+
         # ---- Direct callbacks (called from Worker.run() in background thread) ----
         # These are NOT Qt signal slots – they are plain Python function calls made
         # directly by the worker thread.  They are immune to Qt signal disconnection
@@ -1648,6 +1653,10 @@ class VeoWidget(QtWidgets.QWidget):
 
         def _direct_on_finished(path, metadata):
             """Direct callback from worker thread – always fires."""
+            # Update global status bar
+            task_progress_manager.complete_task(
+                status_task_id, "Done! Video: {}".format(os.path.basename(path)))
+
             # UI updates (safe to skip if widget is gone)
             def _update_ui():
                 try:
@@ -1697,6 +1706,9 @@ class VeoWidget(QtWidgets.QWidget):
 
         def _direct_on_error(err):
             """Direct callback from worker thread – always fires."""
+            # Update global status bar
+            task_progress_manager.error_task(status_task_id, str(err)[:80])
+
             def _update_ui():
                 try:
                     if _isValid(widget_ref):
@@ -1718,6 +1730,11 @@ class VeoWidget(QtWidgets.QWidget):
             lambda s: widget_ref.status_label.setText(s) if _isValid(widget_ref) else None)
         worker.progress_update.connect(
             lambda v: widget_ref.pbar.setValue(v) if _isValid(widget_ref) else None)
+        # Also update global status bar from signals
+        worker.status_update.connect(
+            lambda s: task_progress_manager.update_status(status_task_id, s))
+        worker.progress_update.connect(
+            lambda v: task_progress_manager.update_status(status_task_id, None, progress=v))
         worker.start()
 
     def _toggle_stop_ui(self, is_running):
