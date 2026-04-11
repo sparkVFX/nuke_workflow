@@ -538,9 +538,12 @@ class ChatBubble(QtWidgets.QFrame):
 # Image Thumbnail Strip
 # ---------------------------------------------------------------------------
 class ImageStrip(QtWidgets.QWidget):
-    """Shows thumbnails of attached images with remove buttons."""
+    """Shows thumbnails of attached images with remove buttons.
+    When more than _MAX_VISIBLE thumbnails exist, the extras are shown as
+    a compact 'img3, img4 ...' label to save space."""
 
     imagesChanged = QtCore.Signal()
+    _MAX_VISIBLE = 3  # show full thumbnails for up to this many
 
     def __init__(self, parent=None):
         super(ImageStrip, self).__init__(parent)
@@ -574,7 +577,16 @@ class ImageStrip(QtWidgets.QWidget):
             if w:
                 w.deleteLater()
 
-        for img_path in self._images:
+        if not self._images:
+            self._layout.addStretch()
+            self.setFixedHeight(0)
+            return
+
+        # Show full thumbnails up to _MAX_VISIBLE
+        visible = self._images[:self._MAX_VISIBLE]
+        overflow = self._images[self._MAX_VISIBLE:]
+
+        for idx, img_path in enumerate(visible):
             frame = QtWidgets.QFrame()
             frame.setStyleSheet("QFrame { background: #333; border-radius: 4px; }")
             fl = QtWidgets.QVBoxLayout(frame)
@@ -590,6 +602,14 @@ class ImageStrip(QtWidgets.QWidget):
             thumb.setAlignment(QtCore.Qt.AlignCenter)
             fl.addWidget(thumb)
 
+            # Filename label
+            basename = os.path.basename(img_path)
+            name_short = basename if len(basename) <= 10 else basename[:8] + ".."
+            name_lbl = QtWidgets.QLabel(name_short)
+            name_lbl.setStyleSheet("color: #aaa; font-size: 9px; background: transparent;")
+            name_lbl.setAlignment(QtCore.Qt.AlignCenter)
+            fl.addWidget(name_lbl)
+
             remove_btn = QtWidgets.QPushButton("✕")
             remove_btn.setFixedSize(18, 18)
             remove_btn.setStyleSheet(
@@ -600,11 +620,49 @@ class ImageStrip(QtWidgets.QWidget):
             remove_btn.clicked.connect(lambda checked=False, p=img_path: self._remove(p))
             fl.addWidget(remove_btn, alignment=QtCore.Qt.AlignCenter)
 
-            self._layout.insertWidget(self._layout.count() - 1, frame)
+            self._layout.addWidget(frame)
+
+        # If there are overflow images, show a compact label like "img4, img5 ..."
+        if overflow:
+            overflow_names = []
+            for i, p in enumerate(overflow):
+                overflow_names.append("img{}".format(self._MAX_VISIBLE + i + 1))
+            overflow_text = ", ".join(overflow_names)
+            if len(overflow_text) > 30:
+                overflow_text = overflow_text[:28] + "..."
+
+            overflow_frame = QtWidgets.QFrame()
+            overflow_frame.setStyleSheet("QFrame { background: #2a2a2a; border-radius: 4px; }")
+            ofl = QtWidgets.QVBoxLayout(overflow_frame)
+            ofl.setContentsMargins(6, 4, 6, 4)
+            ofl.setSpacing(2)
+
+            count_lbl = QtWidgets.QLabel("+{} more".format(len(overflow)))
+            count_lbl.setStyleSheet("color: #4f87f7; font-size: 11px; font-weight: bold; background: transparent;")
+            count_lbl.setAlignment(QtCore.Qt.AlignCenter)
+            ofl.addWidget(count_lbl)
+
+            names_lbl = QtWidgets.QLabel(overflow_text)
+            names_lbl.setStyleSheet("color: #888; font-size: 9px; background: transparent;")
+            names_lbl.setAlignment(QtCore.Qt.AlignCenter)
+            names_lbl.setWordWrap(True)
+            ofl.addWidget(names_lbl)
+
+            # Clear-all button for overflow
+            clear_btn = QtWidgets.QPushButton("Clear all")
+            clear_btn.setFixedHeight(18)
+            clear_btn.setStyleSheet(
+                "QPushButton { background: #555; color: #ccc; border: none; "
+                "border-radius: 4px; font-size: 9px; padding: 2px 6px; }"
+                "QPushButton:hover { background: #ef4444; color: white; }"
+            )
+            clear_btn.clicked.connect(self.clear_images)
+            ofl.addWidget(clear_btn, alignment=QtCore.Qt.AlignCenter)
+
+            self._layout.addWidget(overflow_frame)
 
         self._layout.addStretch()
-        h = 90 if self._images else 0
-        self.setFixedHeight(h)
+        self.setFixedHeight(100 if self._images else 0)
 
     def _remove(self, path):
         if path in self._images:
@@ -759,51 +817,51 @@ class GeminiChatPanel(QtWidgets.QWidget):
         input_section = QtWidgets.QVBoxLayout()
         input_section.setSpacing(4)
 
-        # Image attach row
-        img_btn_row = QtWidgets.QHBoxLayout()
-        img_btn_row.setSpacing(6)
+        # Row 1: Input label + Select + Paste + Nuke(+) + stretch + Model combo
+        toolbar_row = QtWidgets.QHBoxLayout()
+        toolbar_row.setSpacing(4)
 
         input_label = QtWidgets.QLabel("Input")
         input_label.setStyleSheet("color: #aaa; font-size: 11px; font-weight: bold;")
-        img_btn_row.addWidget(input_label)
+        toolbar_row.addWidget(input_label)
 
         select_btn = QtWidgets.QPushButton("Select")
         select_btn.setObjectName("actionBtn")
-        select_btn.setToolTip("Select image file from disk")
+        select_btn.setToolTip("Upload local file (images & documents)")
         select_btn.clicked.connect(self._select_image)
-        img_btn_row.addWidget(select_btn)
+        toolbar_row.addWidget(select_btn)
 
         paste_btn = QtWidgets.QPushButton("Paste")
         paste_btn.setObjectName("actionBtn")
         paste_btn.setToolTip("Paste image from clipboard")
         paste_btn.clicked.connect(self._paste_image)
-        img_btn_row.addWidget(paste_btn)
+        toolbar_row.addWidget(paste_btn)
 
-        img_btn_row.addStretch()
-        input_section.addLayout(img_btn_row)
+        nuke_btn = QtWidgets.QPushButton("+")
+        nuke_btn.setObjectName("actionBtn")
+        nuke_btn.setFixedWidth(28)
+        nuke_btn.setToolTip("Add image from selected Nuke Node Graph node")
+        nuke_btn.clicked.connect(self._grab_nuke_node)
+        toolbar_row.addWidget(nuke_btn)
 
-        # Image strip (thumbnails)
-        self._image_strip = ImageStrip()
-        input_section.addWidget(self._image_strip)
-
-        # Model selection
-        model_row = QtWidgets.QHBoxLayout()
-        model_row.setSpacing(6)
-        model_label = QtWidgets.QLabel("Model")
-        model_label.setStyleSheet("color: #aaa; font-size: 11px;")
-        model_label.setFixedWidth(40)
-        model_row.addWidget(model_label)
+        toolbar_row.addStretch()
 
         self._model_combo = QtWidgets.QComboBox()
+        self._model_combo.setMinimumWidth(140)
         for m in CHAT_MODELS:
             self._model_combo.addItem(m)
         self._model_combo.currentIndexChanged.connect(self._on_model_changed)
-        model_row.addWidget(self._model_combo)
-        input_section.addLayout(model_row)
+        toolbar_row.addWidget(self._model_combo)
 
-        # Text input
+        input_section.addLayout(toolbar_row)
+
+        # Row 2: Image strip (thumbnails, collapses when empty)
+        self._image_strip = ImageStrip()
+        input_section.addWidget(self._image_strip)
+
+        # Row 3: Text input
         self._text_input = QtWidgets.QPlainTextEdit()
-        self._text_input.setPlaceholderText("Type your message here...")
+        self._text_input.setPlaceholderText("Please enter the question...")
         self._text_input.setFixedHeight(80)
         self._text_input.installEventFilter(self)
         input_section.addWidget(self._text_input)
@@ -1031,9 +1089,12 @@ class GeminiChatPanel(QtWidgets.QWidget):
     def _select_image(self):
         fpath, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
-            "Select Image",
+            "Select File",
             "",
-            "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp);;All Files (*)",
+            "Images & Docs (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.pdf *.txt *.md *.csv *.json);;"
+            "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp);;"
+            "Documents (*.pdf *.txt *.md *.csv *.json);;"
+            "All Files (*)",
         )
         if fpath:
             self._image_strip.add_image(fpath)
@@ -1058,6 +1119,37 @@ class GeminiChatPanel(QtWidgets.QWidget):
                 self._status_label.setText("Pasted image from clipboard")
                 return
         self._status_label.setText("No image found in clipboard")
+
+    def _grab_nuke_node(self):
+        """Grab the file path from the currently selected Read / Write /
+        image-based node in Nuke's Node Graph and add it as an attachment."""
+        try:
+            import nuke
+        except ImportError:
+            self._status_label.setText("Nuke module not available")
+            return
+
+        sel = nuke.selectedNodes()
+        if not sel:
+            self._status_label.setText("No node selected in Node Graph")
+            return
+
+        added = 0
+        for node in sel:
+            # Try common knob names that hold file paths
+            for knob_name in ("file", "filename", "proxy"):
+                k = node.knob(knob_name)
+                if k:
+                    fpath = k.evaluate() if hasattr(k, 'evaluate') else k.value()
+                    if fpath and os.path.isfile(fpath):
+                        self._image_strip.add_image(fpath)
+                        added += 1
+                        break  # one path per node
+
+        if added:
+            self._status_label.setText("Added {} image(s) from Node Graph".format(added))
+        else:
+            self._status_label.setText("Selected node(s) have no valid file path")
 
     # ---- Send message ------------------------------------------------------
 
