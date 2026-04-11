@@ -62,6 +62,40 @@ CHAT_MODELS = [
 
 SESSIONS_DIR_NAME = "gemini_chat_sessions"
 
+# Gemini API supported file types and their MIME types
+SUPPORTED_MIME_MAP = {
+    # Images
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    # PDF
+    ".pdf": "application/pdf",
+    # Microsoft Office
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    # Plain text / rich text
+    ".txt": "text/plain",
+    ".rtf": "application/rtf",
+    # Structured data
+    ".csv": "text/csv",
+    ".tsv": "text/tab-separated-values",
+}
+SUPPORTED_EXTENSIONS = set(SUPPORTED_MIME_MAP.keys())
+
+# Formats that can be sent inline via Part.from_bytes()
+# (images, plain text, csv/tsv are small and supported inline)
+INLINE_MIME_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp",
+    ".txt", ".csv", ".tsv", ".rtf",
+}
+# All other supported formats (pdf, office docs) must be uploaded via client.files.upload()
+
 # ---------------------------------------------------------------------------
 # Style
 # ---------------------------------------------------------------------------
@@ -900,12 +934,17 @@ class GeminiChatPanel(QtWidgets.QWidget):
 
         root_layout.addLayout(input_section)
 
-    # ---- Event filter (Ctrl+Enter to send) ---------------------------------
+    # ---- Event filter (Enter to send, Ctrl+Enter to newline) ----------------
 
     def eventFilter(self, obj, event):
         if obj is self._text_input and event.type() == QtCore.QEvent.KeyPress:
             if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
                 if event.modifiers() & QtCore.Qt.ControlModifier:
+                    # Ctrl+Enter => insert newline
+                    self._text_input.insertPlainText("\n")
+                    return True
+                else:
+                    # Enter => send message
                     self._send_message()
                     return True
         return super(GeminiChatPanel, self).eventFilter(obj, event)
@@ -1111,12 +1150,25 @@ class GeminiChatPanel(QtWidgets.QWidget):
             self,
             "Select File",
             "",
-            "Images & Docs (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.pdf *.txt *.md *.csv *.json);;"
-            "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp);;"
-            "Documents (*.pdf *.txt *.md *.csv *.json);;"
+            "Supported Files (*.png *.jpg *.jpeg *.gif *.webp *.pdf *.doc *.docx *.ppt *.pptx *.xls *.xlsx *.txt *.rtf *.csv *.tsv);;"
+            "Images (*.png *.jpg *.jpeg *.gif *.webp);;"
+            "Documents (*.pdf *.doc *.docx *.ppt *.pptx *.txt *.rtf);;"
+            "Spreadsheets (*.csv *.tsv *.xls *.xlsx);;"
             "All Files (*)",
         )
         if fpath:
+            ext = os.path.splitext(fpath)[1].lower()
+            if ext not in SUPPORTED_EXTENSIONS:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Unsupported Format",
+                    "The file format '{}' is not supported by Gemini.\n\n"
+                    "Supported formats:\n"
+                    "  Images: png, jpg, jpeg, gif, webp\n"
+                    "  Documents: pdf, doc, docx, ppt, pptx, txt, rtf\n"
+                    "  Spreadsheets: csv, tsv, xls, xlsx".format(ext or "(none)"),
+                )
+                return
             self._image_strip.add_image(fpath)
 
     def _paste_image(self):
@@ -1230,6 +1282,8 @@ class GeminiChatPanel(QtWidgets.QWidget):
 
     def _call_gemini_stream_thread(self, session_data):
         """Runs in background thread — calls Gemini API with streaming."""
+        uploaded_files = []  # track uploaded file handles for cleanup
+        client = None
         try:
             from google import genai
             from google.genai import types
@@ -1248,24 +1302,31 @@ class GeminiChatPanel(QtWidgets.QWidget):
             contents = []
             for msg in session_data.get("messages", []):
                 parts = []
-                # Add images
+                # Add files (images / documents)
                 for img_path in msg.get("images", []):
                     if os.path.isfile(img_path):
                         try:
-                            with open(img_path, "rb") as f:
-                                img_data = f.read()
-                            # Determine mime type
                             ext = os.path.splitext(img_path)[1].lower()
-                            mime_map = {
-                                ".png": "image/png",
-                                ".jpg": "image/jpeg",
-                                ".jpeg": "image/jpeg",
-                                ".gif": "image/gif",
-                                ".webp": "image/webp",
-                                ".bmp": "image/bmp",
-                            }
-                            mime = mime_map.get(ext, "image/png")
-                            parts.append(types.Part.from_bytes(data=img_data, mime_type=mime))
+                            mime = SUPPORTED_MIME_MAP.get(ext)
+                            if not mime:
+                                continue  # skip unsupported formats
+
+                            if ext in INLINE_MIME_EXTENSIONS:
+                                # Images / plain text / csv can be sent inline
+                                with open(img_path, "rb") as f:
+                                    img_data = f.read()
+                                parts.append(types.Part.from_bytes(data=img_data, mime_type=mime))
+                            else:
+                                # PDF / Office docs must be uploaded first
+                                uploaded = client.files.upload(
+                                    file=img_path,
+                                    config=types.UploadFileConfig(mime_type=mime),
+                                )
+                                uploaded_files.append(uploaded)
+                                parts.append(types.Part.from_uri(
+                                    file_uri=uploaded.uri,
+                                    mime_type=mime,
+                                ))
                         except Exception:
                             pass
                 # Add text
@@ -1295,6 +1356,14 @@ class GeminiChatPanel(QtWidgets.QWidget):
             tb = traceback.format_exc()
             print("[GeminiChat] Error: {}".format(tb))
             self._stream_finish("Error: {}".format(str(e)), error=True)
+        finally:
+            # Clean up uploaded files from Gemini File API
+            if client and uploaded_files:
+                for uf in uploaded_files:
+                    try:
+                        client.files.delete(name=uf.name)
+                    except Exception:
+                        pass
 
     def _stream_update_chunk(self, accumulated_text):
         """Thread-safe: update the streaming bubble with accumulated text so far."""
