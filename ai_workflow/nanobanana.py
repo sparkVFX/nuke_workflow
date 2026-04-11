@@ -824,11 +824,16 @@ def _get_internal_read_nb(group_node):
         return None
 
 
-def create_nb_player_node(image_path=None, name=None, xpos=None, ypos=None):
+def create_nb_player_node(image_path=None, name=None, xpos=None, ypos=None,
+                         prompt="", neg_prompt="", model="",
+                         ratio="auto", resolution="1K", seed=0):
     """
     Create a NanoBanana Player Group node wrapping a Read node.
     Similar to VEO Player but for single images (no frame range knobs).
     
+    Now includes generation parameters and regeneration capability,
+    replacing the old Prompt node pattern.
+
     Returns:
         tuple: (group_node, internal_read_node)
     """
@@ -926,9 +931,62 @@ def create_nb_player_node(image_path=None, name=None, xpos=None, ypos=None):
     studio_divider = nuke.Text_Knob("studio_divider", "")
     group.addKnob(studio_divider)
 
-    studio_btn = nuke.PyScript_Knob("send_to_studio", "Send to Studio", _SEND_TO_STUDIO_SCRIPT)
+    studio_btn = nuke.PyScript_Knob("send_to_studio", "Send To Sequence", _SEND_TO_STUDIO_SCRIPT)
     studio_btn.setFlag(nuke.STARTLINE)
     group.addKnob(studio_btn)
+
+    # ============================================================
+    # Generation parameters + Regenerate Tab (replaces old Prompt node)
+    # ============================================================
+    tab_gen = nuke.Tab_Knob("gen_tab", "Regenerate")
+    group.addKnob(tab_gen)
+
+    # Store generation settings as hidden knobs (read by PyCustom widget)
+    model_knob = nuke.String_Knob("nb_model", "Model")
+    model_knob.setValue(model or "")
+    model_knob.setFlag(nuke.INVISIBLE)
+    group.addKnob(model_knob)
+
+    ratio_knob = nuke.String_Knob("nb_ratio", "Ratio")
+    ratio_knob.setValue(ratio or "")
+    ratio_knob.setFlag(nuke.INVISIBLE)
+    group.addKnob(ratio_knob)
+
+    res_knob = nuke.String_Knob("nb_resolution", "Resolution")
+    res_knob.setValue(resolution or "")
+    res_knob.setFlag(nuke.INVISIBLE)
+    group.addKnob(res_knob)
+
+    seed_val = int(seed) if seed else 0
+    seed_clamped = min(seed_val, 2147483647)
+    seed_knob = nuke.Int_Knob("nb_seed", "Seed")
+    seed_knob.setValue(seed_clamped)
+    seed_knob.setFlag(nuke.INVISIBLE)
+    group.addKnob(seed_knob)
+
+    prompt_knob = nuke.Multiline_Eval_String_Knob("nb_prompt", "Prompt")
+    prompt_knob.setValue(prompt)
+    prompt_knob.setFlag(nuke.INVISIBLE)
+    group.addKnob(prompt_knob)
+
+    neg_knob = nuke.Multiline_Eval_String_Knob("nb_neg_prompt", "Negative Prompt")
+    neg_knob.setValue(neg_prompt)
+    neg_knob.setFlag(nuke.INVISIBLE)
+    group.addKnob(neg_knob)
+
+    output_path_knob = nuke.File_Knob("nb_output_path", "Output Path")
+    output_path_knob.setValue((image_path or "").replace("\\", "/"))
+    output_path_knob.setFlag(nuke.INVISIBLE)
+    group.addKnob(output_path_knob)
+
+    # PyCustom_Knob for the regenerate UI widget
+    regen_custom = nuke.PyCustom_Knob(
+        "nanobanana_regen_ui",
+        "",
+        "ai_workflow.nanobanana.NanoBananaPlayerRegenWidget()"
+    )
+    regen_custom.setFlag(nuke.STARTLINE)
+    group.addKnob(regen_custom)
 
     # --- Hidden marker knob ---
     marker = nuke.Boolean_Knob("is_nb_player", "")
@@ -1680,26 +1738,48 @@ class NanoBananaWidget(QtWidgets.QWidget):
 
                 def _create_nodes():
                     try:
-                        print("NanoBanana: Creating Prompt node with output: {}".format(path))
-                        prompt_node, read_node = create_prompt_node(
-                            params["generator_node"],
-                            params["prompt"],
-                            params["neg_prompt"],
-                            params["model"],
-                            params["ratio"],
-                            params["resolution"],
-                            params["seed"],
-                            path,
-                            params["images_info"]
+                        gen_node = params["generator_node"]
+                        gen_x = int(gen_node["xpos"].value())
+                        gen_y = int(gen_node["ypos"].value())
+
+                        # Find existing players connected to this generator
+                        existing_players = []
+                        for n in nuke.allNodes("Group"):
+                            if "is_nb_player" in n.knobs() and n["is_nb_player"].value():
+                                inp = n.input(0)
+                                if inp and (inp.name() == gen_node.name()):
+                                    existing_players.append(n)
+
+                        player_num = len(existing_players) + 1
+                        if existing_players:
+                            last_p = max(existing_players, key=lambda nn: nn["ypos"].value())
+                            px = int(last_p["xpos"].value()) + 200
+                            py = int(last_p["ypos"].value())
+                        else:
+                            px = gen_x + 300
+                            py = gen_y + 50
+
+                        player_name = "NB_Result{}".format(player_num)
+                        player_node, read_node = create_nb_player_node(
+                            image_path=path,
+                            name=player_name,
+                            xpos=px,
+                            ypos=py,
+                            prompt=params["prompt"],
+                            neg_prompt=params["neg_prompt"],
+                            model=params["model"],
+                            ratio=params["ratio"],
+                            resolution=params["resolution"],
+                            seed=params["seed"]
                         )
+                        player_node.setInput(0, gen_node)
+
+                        print("NanoBanana: Created NB Player '{}' with regeneration UI".format(player_name))
                         if read_node:
                             try:
                                 nuke.connectViewer(0, read_node)
-                                print("NanoBanana: Connected viewer to Read node")
                             except Exception as e:
                                 print("NanoBanana: Could not connect viewer: {}".format(e))
-                        else:
-                            print("NanoBanana: WARNING - No Read node was created")
                     except Exception as e:
                         import traceback
                         print("NanoBanana: ERROR in _create_nodes: {}".format(e))
@@ -2720,6 +2800,435 @@ nuke.addKnobChanged(_nanobanana_input_changed, nodeClass="Group")
 # ---------------------------------------------------------------------------
 # Knob Widget Wrappers (for PyCustom_Knob)
 # ---------------------------------------------------------------------------
+
+class NanoBananaPlayerRegenWidget(QtWidgets.QWidget):
+    """Widget for NB Player node's Regenerate tab.
+    
+    Shows the generation record (read-only) at top,
+    and editable parameters + REGENERATE button below.
+    Replaces the old Prompt node's functionality.
+    """
+
+    def __init__(self):
+        super(NanoBananaPlayerRegenWidget, self).__init__()
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        try:
+            self.node = nuke.thisNode()
+        except Exception:
+            self.node = None
+
+        self.panel = _NanoBananaPlayerRegenPanel(self.node, parent=self)
+        layout.addWidget(self.panel)
+
+    def makeUI(self):
+        return self
+
+    def updateValue(self):
+        try:
+            if hasattr(self, 'panel'):
+                self.panel._save_state_to_node()
+        except Exception:
+            pass
+
+
+class _NanoBananaPlayerRegenPanel(QtWidgets.QWidget):
+    """The actual panel content for Player regeneration UI."""
+
+    def __init__(self, node=None, parent=None):
+        super(_NanoBananaPlayerRegenPanel, self).__init__(parent)
+        self.node = node
+        self.setObjectName("nbPlayerRegenRoot")
+        self.setStyleSheet(NANOBANANA_STYLE)
+        self.setMinimumWidth(380)
+        font = self.font()
+        font.setStyleStrategy(QtGui.QFont.NoSubpixelAntialias)
+        self.setFont(font)
+
+        self.settings = NanoBananaSettings()
+        self.current_worker = None
+        self._build_ui()
+
+        if node:
+            self._load_from_node(node)
+
+    def _build_ui(self):
+        main = QtWidgets.QVBoxLayout(self)
+        main.setSpacing(6)
+        main.setContentsMargins(8, 8, 8, 8)
+
+        # --- Read-only Generation Record ---
+        record_frame = QtWidgets.QFrame()
+        record_frame.setStyleSheet(
+            "QFrame { background: #1a1a1a; border: 1px solid #444; border-radius: 4px; }")
+        rec_layout = QtWidgets.QVBoxLayout(record_frame)
+        rec_layout.setSpacing(4)
+        rec_layout.setContentsMargins(8, 8, 8, 8)
+
+        header = QtWidgets.QLabel("Regenerate (edit params below)")
+        header.setStyleSheet(
+            "color: #facc15; font-weight: bold; font-size: 12px; background: transparent;")
+        header.setAlignment(QtCore.Qt.AlignCenter)
+        rec_layout.addWidget(header)
+
+        # Model | Ratio | Resolution | Seed info row
+        label_style = "color: #888; font-size: 10px; font-weight: bold; background: transparent;"
+        value_style = "color: #ccc; font-size: 11px; background: transparent; padding: 0px;"
+        info_row = QtWidgets.QHBoxLayout()
+        info_row.setSpacing(8)
+
+        self.info_labels = {}
+        fields = [("Model", "model"), ("Ratio", "ratio"),
+                  ("Resolution", "resolution"), ("Seed", "seed")]
+        for idx, (display_name, key) in enumerate(fields):
+            col = QtWidgets.QVBoxLayout()
+            col.setSpacing(1)
+            lbl = QtWidgets.QLabel(display_name)
+            lbl.setStyleSheet(label_style)
+            lbl.setAlignment(QtCore.Qt.AlignCenter)
+            val = QtWidgets.QLabel("")
+            val.setStyleSheet(value_style)
+            val.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            col.addWidget(lbl)
+            col.addWidget(val)
+            info_row.addLayout(col)
+            self.info_labels[key] = val
+
+            if idx < len(fields) - 1:
+                sep = QtWidgets.QFrame()
+                sep.setFrameShape(QtWidgets.QFrame.VLine)
+                sep.setStyleSheet("color: #444;")
+                info_row.addWidget(sep)
+
+        rec_layout.addLayout(info_row)
+
+        # Prompt (read-only display)
+        prompt_hdr = QtWidgets.QLabel("Prompt:")
+        prompt_hdr.setStyleSheet(label_style)
+        rec_layout.addWidget(prompt_hdr)
+        self.prompt_display = QtWidgets.QPlainTextEdit()
+        self.prompt_display.setReadOnly(True)
+        self.prompt_display.setMaximumHeight(80)
+        self.prompt_display.setStyleSheet(
+            "background: #2a2a2a; border: 1px solid #444; color: #ccc; font-size: 11px;")
+        rec_layout.addWidget(self.prompt_display)
+
+        neg_hdr = QtWidgets.QLabel("Negative:")
+        neg_hdr.setStyleSheet(label_style)
+        rec_layout.addWidget(neg_hdr)
+        self.neg_prompt_display = QtWidgets.QPlainTextEdit()
+        self.neg_prompt_display.setReadOnly(True)
+        self.neg_prompt_display.setMaximumHeight(50)
+        self.neg_prompt_display.setStyleSheet(
+            "background: #2a2a2a; border: 1px solid #444; color: #ccc; font-size: 11px;")
+        rec_layout.addWidget(self.neg_prompt_display)
+
+        main.addWidget(record_frame)
+
+        # --- Editable Parameters Section ---
+
+        # Model combo
+        self.model_combo = DropDownComboBox()
+        self.model_combo.addItem("Gemini 3.1 Flash", "gemini-3.1-flash-image-preview")
+        self.model_combo.addItem("Gemini 3 Pro", "gemini-3-pro-image-preview")
+        self.model_combo.addItem("Gemini 2.5 Flash", "gemini-2.5-flash-image")
+        self.model_combo.addItem("Imagen 3.0", "imagen-3.0-generate-002")
+        main.addWidget(self.model_combo)
+
+        row2 = QtWidgets.QHBoxLayout()
+        row2.setSpacing(6)
+        self.ratio_combo = DropDownComboBox()
+        self.ratio_combo.addItems(["Auto", "1:1", "16:9", "9:16", "4:3", "3:4"])
+        self.res_combo = DropDownComboBox()
+        self.res_combo.addItem("1K", "1K")
+        self.res_combo.addItem("2K", "2K")
+        self.res_combo.addItem("4K", "4K")
+        row2.addWidget(self.ratio_combo)
+        row2.addWidget(self.res_combo)
+        main.addLayout(row2)
+
+        # Seed
+        row3 = QtWidgets.QHBoxLayout()
+        row3.setSpacing(6)
+        seed_lbl = QtWidgets.QLabel("Seed:")
+        seed_lbl.setStyleSheet("color: #aaa; font-size: 11px;")
+        self.seed_input = QtWidgets.QLineEdit()
+        self.seed_input.setPlaceholderText("Random")
+        self.seed_input.setValidator(QtGui.QIntValidator())
+        self.seed_input.setEnabled(False)
+        self.random_chk = QtWidgets.QCheckBox("Random")
+        self.random_chk.setChecked(True)
+        self.random_chk.toggled.connect(lambda c: self.seed_input.setEnabled(not c))
+        row3.addWidget(seed_lbl)
+        row3.addWidget(self.seed_input, 1)
+        row3.addWidget(self.random_chk)
+        main.addLayout(row3)
+
+        # Editable prompt
+        self.prompt_edit = QtWidgets.QTextEdit()
+        self.prompt_edit.setPlaceholderText("Edit prompt to regenerate...")
+        self.prompt_edit.setMinimumHeight(80)
+        main.addWidget(self.prompt_edit)
+
+        self.neg_edit = QtWidgets.QTextEdit()
+        self.neg_edit.setPlaceholderText("Negative prompt (optional)...")
+        self.neg_edit.setMinimumHeight(50)
+        main.addWidget(self.neg_edit)
+
+        # REGENERATE BUTTON
+        self.regen_btn = QtWidgets.QPushButton("REGENERATE IMAGE")
+        self.regen_btn.setObjectName("regenerateBtn")
+        self.regen_btn.setMinimumHeight(42)
+        self.regen_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.regen_btn.clicked.connect(self._on_regenerate)
+        main.addWidget(self.regen_btn)
+
+        # Progress bar
+        self.pbar = QtWidgets.QProgressBar()
+        self.pbar.setVisible(False)
+        self.pbar.setTextVisible(False)
+        self.pbar.setFixedHeight(6)
+        main.addWidget(self.pbar)
+
+        # Status label
+        self.status_label = QtWidgets.QLabel("")
+        self.status_label.setStyleSheet("color: #888; font-size: 11px; background: transparent;")
+        main.addWidget(self.status_label)
+
+    def _load_from_node(self, node):
+        """Load stored parameters from the Player node's hidden knobs into the UI."""
+        if not node:
+            return
+
+        for key, knob_name, cast_fn in [
+            ("model", "nb_model", str), ("ratio", "nb_ratio", str),
+            ("resolution", "nb_resolution", str), ("seed", "nb_seed", int),
+        ]:
+            if knob_name in node.knobs():
+                val = node[knob_name].value()
+                try:
+                    val = cast_fn(val)
+                    self.info_labels[key].setText(str(val))
+                except:
+                    pass
+
+        for knob_key, display_widget in [("nb_prompt", self.prompt_display),
+                                         ("nb_neg_prompt", self.neg_prompt_display)]:
+            if knob_key in node.knobs():
+                display_widget.setPlainText(node[knob_key].value() or "")
+
+        if "nb_model" in node.knobs():
+            model_val = node["nb_model"].value()
+            for i in range(self.model_combo.count()):
+                if self.model_combo.itemData(i) == model_val:
+                    self.model_combo.setCurrentIndex(i)
+                    break
+
+        if "nb_ratio" in node.knobs():
+            ratio_val = node["nb_ratio"].value()
+            ratio_idx = self.ratio_combo.findText(ratio_val)
+            if ratio_idx >= 0:
+                self.ratio_combo.setCurrentIndex(ratio_idx)
+
+        if "nb_resolution" in node.knobs():
+            res_val = node["nb_resolution"].value()
+            res_idx = self.res_combo.findText(res_val)
+            if res_idx >= 0:
+                self.res_combo.setCurrentIndex(res_idx)
+
+        if "nb_seed" in node.knobs():
+            s = int(node["nb_seed"].value())
+            if s <= 0:
+                self.random_chk.setChecked(True)
+            else:
+                self.random_chk.setChecked(False)
+                self.seed_input.setText(str(s))
+
+        if "nb_prompt" in node.knobs():
+            self.prompt_edit.setPlainText(node["nb_prompt"].value() or "")
+        if "nb_neg_prompt" in node.knobs():
+            self.neg_edit.setPlainText(node["nb_neg_prompt"].value() or "")
+
+    def _save_state_to_node(self):
+        """Save current editable values back to the node's hidden knobs."""
+        if not self.node:
+            return
+        try:
+            if "nb_model" in self.node.knobs():
+                self.node["nb_model"].setValue(str(self.model_combo.currentData()))
+            if "nb_ratio" in self.node.knobs():
+                self.node["nb_ratio"].setValue(self.ratio_combo.currentText())
+            if "nb_resolution" in self.node.knobs():
+                self.node["nb_resolution"].setValue(self.res_combo.currentText())
+            if "nb_seed" in self.node.knobs():
+                if self.random_chk.isChecked():
+                    self.node["nb_seed"].setValue(0)
+                else:
+                    try:
+                        self.node["nb_seed"].setValue(int(self.seed_input.text()) or 0)
+                    except ValueError:
+                        self.node["nb_seed"].setValue(0)
+            if "nb_prompt" in self.node.knobs():
+                self.node["nb_prompt"].setValue(self.prompt_edit.toPlainText())
+            if "nb_neg_prompt" in self.node.knobs():
+                self.node["nb_neg_prompt"].setValue(self.neg_edit.toPlainText())
+        except Exception as e:
+            print("[NB Player Regen] Error saving state: {}".format(e))
+
+    def _toggle_ui(self, is_running):
+        if is_running:
+            self.regen_btn.setText("STOP")
+            self.regen_btn.setObjectName("stopBtn")
+            self.regen_btn.setStyleSheet("")
+            self.regen_btn.style().unpolish(self.regen_btn)
+            self.regen_btn.style().polish(self.regen_btn)
+            self.pbar.setRange(0, 0)
+            self.pbar.setVisible(True)
+        else:
+            self.regen_btn.setText("REGENERATE IMAGE")
+            self.regen_btn.setObjectName("regenerateBtn")
+            self.regen_btn.setStyleSheet("")
+            self.regen_btn.style().unpolish(self.regen_btn)
+            self.regen_btn.style().polish(self.regen_btn)
+            self.current_worker = None
+            self.pbar.setVisible(False)
+            self.pbar.reset()
+
+    def _on_regenerate(self):
+        """Handle regenerate button click - read params from Player node and re-generate."""
+        if not self.node:
+            nuke.message("No associated node.")
+            return
+
+        if not self.settings.api_key:
+            nuke.message("API key not set.\nPlease open CompMind > Setting in the toolbar.")
+            return
+
+        self._save_state_to_node()
+
+        model = ""
+        ratio = "auto"
+        resolution = "1K"
+        seed = 0
+        prompt_text = ""
+        neg_text = ""
+
+        for knob_key, target_var in [
+            ("nb_model", None), ("nb_ratio", None), ("nb_resolution", None),
+            ("nb_seed", None), ("nb_prompt", None), ("nb_neg_prompt", None),
+        ]:
+            if knob_key in self.node.knobs():
+                val = self.node[knob_key].value()
+                if knob_key == "nb_model":
+                    model = val
+                elif knob_key == "nb_ratio":
+                    ratio = val or "auto"
+                elif knob_key == "nb_resolution":
+                    resolution = val or "1K"
+                elif knob_key == "nb_seed":
+                    seed = int(val) or 0
+                elif knob_key == "nb_prompt":
+                    prompt_text = val or ""
+                elif knob_key == "nb_neg_prompt":
+                    neg_text = val or ""
+
+        if not model:
+            nuke.message("No model set on this player node.")
+            return
+
+        output_dir = self.settings.temp_dir
+        if not os.path.isdir(output_dir):
+            output_dir = os.path.join(os.path.expanduser("~"), ".nuke", "AI_Output")
+
+        if self.random_chk.isChecked() or seed <= 0:
+            import random as _rnd
+            seed = _rnd.randint(1, 999999999)
+
+        self.status_label.setStyleSheet("color: #facc15; font-size: 11px;")
+        self.status_label.setText("Generating...")
+        self._toggle_ui(True)
+
+        gen_name = "NB_Regen_{}".format(int(time.time()))
+
+        worker = NanoBananaWorker(
+            model, prompt_text, neg_text, ratio, resolution, seed,
+            [], output_dir, self.settings.api_key,
+            gen_name=gen_name
+        )
+        self.current_worker = worker
+        widget_ref = self
+        node_ref = self.node
+
+        def _on_finished(path, metadata):
+            try:
+                widget_ref._toggle_ui(False)
+                s = metadata.get("seed", "N/A")
+                widget_ref.status_label.setStyleSheet("color: #3CB371; font-size: 11px;")
+                widget_ref.status_label.setText("Done! Seed: {}".format(s))
+                widget_ref.info_labels["seed"].setText(str(s))
+            except Exception:
+                pass
+
+            if path and os.path.exists(path):
+                def _update_read():
+                    try:
+                        internal_read = _get_internal_read_nb(node_ref)
+                        if internal_read:
+                            internal_read["file"].fromUserText(path)
+                            node_ref["nb_file"].setValue(path.replace("\\", "/"))
+                            node_ref["nb_output_path"].setValue(path.replace("\\", "/"))
+                            new_seed = metadata.get("seed", s)
+                            widget_ref.info_labels["seed"].setText(str(new_seed))
+                            node_ref["nb_seed"].setValue(int(new_seed) if new_seed else 0)
+                            try:
+                                nuke.connectViewer(0, internal_read)
+                            except:
+                                pass
+                    except Exception as e:
+                        print("[NB Player Regen] ERROR updating: {}".format(e))
+                    finally:
+                        _active_workers.pop(worker_id, None)
+                nuke.executeInMainThread(_update_read)
+            else:
+                _active_workers.pop(worker_id, None)
+
+        def _on_error(err):
+            try:
+                widget_ref._toggle_ui(False)
+                widget_ref.status_label.setStyleSheet("color: #ef4444; font-size: 11px;")
+                widget_ref.status_label.setText("Error")
+            except:
+                pass
+            _active_workers.pop(worker_id, None)
+            nuke.executeInMainThread(nuke.message,
+                                     args=("Regeneration Error:\n{}".format(err),))
+
+        worker.finished.connect(_on_finished)
+        worker.error.connect(_on_error)
+        worker.status_update.connect(
+            lambda s: widget_ref.status_label.setText(s) if widget_ref else None)
+
+        worker_id = id(worker)
+        _active_workers[worker_id] = {"worker": worker, "params": {}}
+
+        try:
+            from ai_workflow.status_bar import task_progress_manager
+            status_tid = task_progress_manager.add_task(node_ref.name(), "image")
+            worker.status_update.connect(
+                lambda s: task_progress_manager.update_status(status_tid, s))
+            worker.finished.connect(
+                lambda p, m, tid=status_tid:
+                    task_progress_manager.complete_task(tid, "Done!"))
+            worker.error.connect(
+                lambda e, tid=status_tid:
+                    task_progress_manager.error_task(tid, str(e)[:80]))
+        except Exception:
+            pass
+
+        worker.start()
+
+
 class NanoBananaKnobWidget(QtWidgets.QWidget):
     """Wrapper for NanoBanana_Generate node."""
 
