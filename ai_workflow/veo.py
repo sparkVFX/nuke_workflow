@@ -256,7 +256,8 @@ class VeoWorker(QtCore.QThread):
                  resolution="720P",
                  mode="Text",
                  negative_prompt="",
-                 temp_dir=None, gen_name="VEO_Generate"):
+                 temp_dir=None, gen_name="VEO_Generate",
+                 on_finished_callback=None, on_error_callback=None):
         super(VeoWorker, self).__init__()
         self.api_key = api_key
         self.prompt = prompt
@@ -270,6 +271,9 @@ class VeoWorker(QtCore.QThread):
         self.temp_dir = temp_dir or get_output_directory()
         self.gen_name = gen_name
         self.is_running = True
+        # Direct callbacks that bypass Qt signal system – immune to widget destruction
+        self._on_finished_cb = on_finished_callback
+        self._on_error_cb = on_error_callback
 
     def stop(self):
         self.is_running = False
@@ -286,6 +290,8 @@ class VeoWorker(QtCore.QThread):
                     ref_images.append(_load_image_for_sdk(rp))
 
             if not self.is_running:
+                if self._on_error_cb:
+                    self._on_error_cb("Generation cancelled by user")
                 return
 
             # 2. Build generation config
@@ -402,6 +408,8 @@ class VeoWorker(QtCore.QThread):
             operation = client.models.generate_videos(**generate_kwargs)
 
             if not self.is_running:
+                if self._on_error_cb:
+                    self._on_error_cb("Generation cancelled by user")
                 return
 
             # 4. Poll for completion
@@ -419,10 +427,15 @@ class VeoWorker(QtCore.QThread):
                 operation = client.operations.get(operation)
 
             if not self.is_running:
+                if self._on_error_cb:
+                    self._on_error_cb("Generation cancelled by user")
                 return
 
             if not operation.done:
-                self.error.emit("Video generation timed out")
+                err_msg = "Video generation timed out"
+                self.error.emit(err_msg)
+                if self._on_error_cb:
+                    self._on_error_cb(err_msg)
                 return
 
             # 5. Download video
@@ -441,9 +454,15 @@ class VeoWorker(QtCore.QThread):
                 if rai_reasons:
                     reason_str = "; ".join(rai_reasons)
                     print("VEO SDK: Filtered by safety: {}".format(reason_str))
-                    self.error.emit("Video blocked by safety filter:\n{}".format(reason_str))
+                    err_msg = "Video blocked by safety filter:\n{}".format(reason_str)
+                    self.error.emit(err_msg)
+                    if self._on_error_cb:
+                        self._on_error_cb(err_msg)
                 else:
-                    self.error.emit("No video generated in response")
+                    err_msg = "No video generated in response"
+                    self.error.emit(err_msg)
+                    if self._on_error_cb:
+                        self._on_error_cb(err_msg)
                 return
 
             video = generated_videos[0]
@@ -485,11 +504,17 @@ class VeoWorker(QtCore.QThread):
             }
 
             self.finished.emit(final_path, metadata)
+            # Direct callback – works even if widget (signal receiver) is destroyed
+            if self._on_finished_cb:
+                self._on_finished_cb(final_path, metadata)
 
         except Exception as e:
             import traceback
             traceback.print_exc()
-            self.error.emit("Error: {}".format(str(e)))
+            err_msg = "Error: {}".format(str(e))
+            self.error.emit(err_msg)
+            if self._on_error_cb:
+                self._on_error_cb(err_msg)
 
 
 # ---------------------------------------------------------------------------
@@ -1616,16 +1641,23 @@ class VeoWidget(QtWidgets.QWidget):
         # Capture references for closures so they don't depend on self
         widget_ref = self
 
-        def _on_finished(path, metadata):
-            """Called when generation finishes. Works even if widget is destroyed."""
-            try:
-                _alive = _isValid(widget_ref)
-                if _alive:
-                    widget_ref._toggle_stop_ui(False)
-                    widget_ref.status_label.setStyleSheet("color: #3CB371; font-size: 11px;")
-                    widget_ref.status_label.setText("Done! Video: {}".format(os.path.basename(path)))
-            except Exception:
-                pass
+        # ---- Direct callbacks (called from Worker.run() in background thread) ----
+        # These are NOT Qt signal slots – they are plain Python function calls made
+        # directly by the worker thread.  They are immune to Qt signal disconnection
+        # that happens when Nuke destroys the PyCustom_Knob widget.
+
+        def _direct_on_finished(path, metadata):
+            """Direct callback from worker thread – always fires."""
+            # UI updates (safe to skip if widget is gone)
+            def _update_ui():
+                try:
+                    if _isValid(widget_ref):
+                        widget_ref._toggle_stop_ui(False)
+                        widget_ref.status_label.setStyleSheet("color: #3CB371; font-size: 11px;")
+                        widget_ref.status_label.setText("Done! Video: {}".format(os.path.basename(path)))
+                except Exception:
+                    pass
+            nuke.executeInMainThread(_update_ui)
 
             if path and os.path.exists(path):
                 params = gen_params
@@ -1663,21 +1695,25 @@ class VeoWidget(QtWidgets.QWidget):
                     args=("Video generation completed but no file was created.\nPath: {}".format(path),)
                 )
 
-        def _on_error(err):
-            """Called on generation error. Works even if widget is destroyed."""
-            try:
-                _alive = _isValid(widget_ref)
-                if _alive:
-                    widget_ref._toggle_stop_ui(False)
-                    widget_ref.status_label.setStyleSheet("color: #ef4444; font-size: 11px;")
-                    widget_ref.status_label.setText("Error")
-            except Exception:
-                pass
+        def _direct_on_error(err):
+            """Direct callback from worker thread – always fires."""
+            def _update_ui():
+                try:
+                    if _isValid(widget_ref):
+                        widget_ref._toggle_stop_ui(False)
+                        widget_ref.status_label.setStyleSheet("color: #ef4444; font-size: 11px;")
+                        widget_ref.status_label.setText("Error")
+                except Exception:
+                    pass
+            nuke.executeInMainThread(_update_ui)
             _veo_active_workers.pop(worker_id, None)
             nuke.executeInMainThread(nuke.message, args=("VEO Error:\n{}".format(err),))
 
-        worker.finished.connect(_on_finished)
-        worker.error.connect(_on_error)
+        # Assign direct callbacks to worker (called from run() regardless of signal state)
+        worker._on_finished_cb = _direct_on_finished
+        worker._on_error_cb = _direct_on_error
+
+        # Signal connections kept for UI updates while widget is alive
         worker.status_update.connect(
             lambda s: widget_ref.status_label.setText(s) if _isValid(widget_ref) else None)
         worker.progress_update.connect(

@@ -1644,23 +1644,29 @@ class NanoBananaWidget(QtWidgets.QWidget):
         # Capture references for closures so they don't depend on self
         widget_ref = self
 
-        def _on_finished(path, metadata):
-            """Called when generation finishes. Works even if widget is destroyed."""
-            try:
-                _alive = _isValid(widget_ref)
-                if _alive:
-                    widget_ref._toggle_stop_ui(False)
-                    s = metadata.get("seed", "N/A")
-                    widget_ref.status_label.setStyleSheet("color: #3CB371; font-size: 11px;")
-                    widget_ref.status_label.setText("Done! Seed: {}".format(s))
-            except Exception:
-                pass  # widget destroyed, skip UI update
+        # ---- Direct callbacks (called from Worker.run() in background thread) ----
+        # These are NOT Qt signal slots – they are plain Python function calls made
+        # directly by the worker thread.  They are immune to Qt signal disconnection
+        # that happens when Nuke destroys the PyCustom_Knob widget.
+
+        def _direct_on_finished(path, metadata):
+            """Direct callback from worker thread – always fires."""
+            # UI updates (safe to skip if widget is gone)
+            def _update_ui():
+                try:
+                    if _isValid(widget_ref):
+                        widget_ref._toggle_stop_ui(False)
+                        s = metadata.get("seed", "N/A")
+                        widget_ref.status_label.setStyleSheet("color: #3CB371; font-size: 11px;")
+                        widget_ref.status_label.setText("Done! Seed: {}".format(s))
+                except Exception:
+                    pass
+            nuke.executeInMainThread(_update_ui)
 
             print("NanoBanana: Generation finished. Output path: {}".format(path))
             print("NanoBanana: Path exists: {}".format(os.path.exists(path) if path else False))
 
             if path and os.path.exists(path):
-                # Use gen_params captured in closure, not self._gen_params
                 params = gen_params
 
                 def _create_nodes():
@@ -1697,21 +1703,25 @@ class NanoBananaWidget(QtWidgets.QWidget):
                 _active_workers.pop(worker_id, None)
                 nuke.executeInMainThread(nuke.message, args=("Generation completed but no image was created.\nPath: {}".format(path),))
 
-        def _on_error(err):
-            """Called on generation error. Works even if widget is destroyed."""
-            try:
-                _alive = _isValid(widget_ref)
-                if _alive:
-                    widget_ref._toggle_stop_ui(False)
-                    widget_ref.status_label.setStyleSheet("color: #ef4444; font-size: 11px;")
-                    widget_ref.status_label.setText("Error")
-            except Exception:
-                pass
+        def _direct_on_error(err):
+            """Direct callback from worker thread – always fires."""
+            def _update_ui():
+                try:
+                    if _isValid(widget_ref):
+                        widget_ref._toggle_stop_ui(False)
+                        widget_ref.status_label.setStyleSheet("color: #ef4444; font-size: 11px;")
+                        widget_ref.status_label.setText("Error")
+                except Exception:
+                    pass
+            nuke.executeInMainThread(_update_ui)
             _active_workers.pop(worker_id, None)
             nuke.executeInMainThread(nuke.message, args=("Generation Error:\n{}".format(err),))
 
-        worker.finished.connect(_on_finished)
-        worker.error.connect(_on_error)
+        # Assign direct callbacks to worker (called from run() regardless of signal state)
+        worker._on_finished_cb = _direct_on_finished
+        worker._on_error_cb = _direct_on_error
+
+        # Signal connections kept for UI updates while widget is alive
         worker.status_update.connect(
             lambda s: widget_ref.status_label.setText(s) if _isValid(widget_ref) else None)
         worker.start()
@@ -2251,7 +2261,8 @@ class NanoBananaWorker(QtCore.QThread):
     status_update = QtCore.Signal(str)
 
     def __init__(self, model_name, prompt, neg_prompt, aspect_ratio, resolution, seed, 
-                 images_info=None, temp_dir=None, api_key=None, gen_name="nanobanana"):
+                 images_info=None, temp_dir=None, api_key=None, gen_name="nanobanana",
+                 on_finished_callback=None, on_error_callback=None):
         super(NanoBananaWorker, self).__init__()
         self.model_name = model_name
         self.prompt = prompt
@@ -2264,6 +2275,9 @@ class NanoBananaWorker(QtCore.QThread):
         self.api_key = api_key
         self.gen_name = gen_name
         self.is_running = True
+        # Direct callbacks that bypass Qt signal system – immune to widget destruction
+        self._on_finished_cb = on_finished_callback
+        self._on_error_cb = on_error_callback
 
     def stop(self):
         self.is_running = False
@@ -2327,6 +2341,9 @@ class NanoBananaWorker(QtCore.QThread):
                 generation_config["imageConfig"] = image_config
             
             if not self.is_running:
+                # User cancelled before API call – invoke error callback to clean up
+                if self._on_error_cb:
+                    self._on_error_cb("Generation cancelled by user")
                 return
             
             self.status_update.emit("Calling API ({} images)...".format(len(connected_images)))
@@ -2378,10 +2395,16 @@ class NanoBananaWorker(QtCore.QThread):
             )
             
             if not self.is_running:
+                # User cancelled after API call – invoke error callback to clean up
+                if self._on_error_cb:
+                    self._on_error_cb("Generation cancelled by user")
                 return
             
             if not success:
-                self.error.emit("API Error: {}".format(result))
+                err_msg = "API Error: {}".format(result)
+                self.error.emit(err_msg)
+                if self._on_error_cb:
+                    self._on_error_cb(err_msg)
                 return
             
             self.status_update.emit("Processing response...")
@@ -2389,7 +2412,10 @@ class NanoBananaWorker(QtCore.QThread):
             output_path, extract_error = extract_image_from_response(result, self.temp_dir, self.gen_name)
             
             if extract_error:
-                self.error.emit("Failed to extract image: {}".format(extract_error))
+                err_msg = "Failed to extract image: {}".format(extract_error)
+                self.error.emit(err_msg)
+                if self._on_error_cb:
+                    self._on_error_cb(err_msg)
                 return
             
             metadata = {
@@ -2401,9 +2427,15 @@ class NanoBananaWorker(QtCore.QThread):
             
             self.status_update.emit("Image generated!")
             self.finished.emit(output_path, metadata)
+            # Direct callback – works even if widget (signal receiver) is destroyed
+            if self._on_finished_cb:
+                self._on_finished_cb(output_path, metadata)
             
         except Exception as e:
-            self.error.emit("Error: {}".format(str(e)))
+            err_msg = "Error: {}".format(str(e))
+            self.error.emit(err_msg)
+            if self._on_error_cb:
+                self._on_error_cb(err_msg)
 
 
 # ---------------------------------------------------------------------------
