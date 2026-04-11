@@ -15,6 +15,12 @@ def create_node_generate_image_midjourney():
     nuke.message("Generate Image Midjourney node created.")
 
 
+def open_gemini_dialogue():
+    """Open the Gemini Dialogue chat panel (floating window, not a node)."""
+    import ai_workflow.gemini_chat as gc
+    gc.open_gemini_chat_panel()
+
+
 def create_node_generate_image_nanobanana():
     """Generate Image NanoBanana - creates a node with custom PySide/Qt panel."""
     import ai_workflow.nanobanana as nb
@@ -117,11 +123,11 @@ def register_toolbar():
     toolbar = nuke.toolbar("Nodes")
     ai_menu = toolbar.addMenu("AI Workflow", icon="ai_workflow.png")
 
-    # Add the 5 buttons to the toolbar menu
+    # Add the buttons to the toolbar menu
     ai_menu.addCommand(
-        "Generate Image Midjourney",
-        "ai_workflow.toolbar.create_node_generate_image_midjourney()",
-        icon="Midjourney.png",
+        "Generate Dialogue Gemini",
+        "ai_workflow.toolbar.open_gemini_dialogue()",
+        icon="GeminiChat.png",
     )
     ai_menu.addCommand(
         "Generate Image NanoBanana",

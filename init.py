@@ -128,6 +128,10 @@ else:
             import ai_workflow.veo
         except ImportError as e:
             print("VEO: Warning - could not preload module: {}".format(e))
+        try:
+            import ai_workflow.gemini_chat
+        except ImportError as e:
+            print("GeminiChat: Warning - could not preload module: {}".format(e))
 
     nuke.addOnCreate(_preload_custom_knob_modules, nodeClass="Root")
 
