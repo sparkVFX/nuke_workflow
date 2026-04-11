@@ -248,60 +248,160 @@ class SessionManager:
 
 
 # ---------------------------------------------------------------------------
+# Custom Copy Icon — painted with QPainter (no emoji dependency)
+# ---------------------------------------------------------------------------
+class _CopyIconWidget(QtWidgets.QWidget):
+    """A small widget that paints a 'two overlapping rectangles' copy icon."""
+
+    def __init__(self, size=16, color="#888888", parent=None):
+        super(_CopyIconWidget, self).__init__(parent)
+        self._color = QtGui.QColor(color)
+        self.setFixedSize(size, size)
+
+    def set_color(self, color_str):
+        self._color = QtGui.QColor(color_str)
+        self.update()
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        pen = QtGui.QPen(self._color, 1.2)
+        p.setPen(pen)
+        p.setBrush(QtCore.Qt.NoBrush)
+        w = self.width()
+        h = self.height()
+        # Back rectangle (offset top-left)
+        m = int(w * 0.15)
+        rw = int(w * 0.6)
+        rh = int(h * 0.65)
+        p.drawRoundedRect(m, m, rw, rh, 2, 2)
+        # Front rectangle (offset bottom-right)
+        x2 = w - m - rw
+        y2 = h - m - rh
+        p.drawRoundedRect(x2, y2, rw, rh, 2, 2)
+        p.end()
+
+
+# ---------------------------------------------------------------------------
 # Chat Bubble Widget
 # ---------------------------------------------------------------------------
 class ChatBubble(QtWidgets.QFrame):
     """A single chat message bubble."""
 
+    _MAX_USER_LINES = 3  # User bubble collapsed line limit
+
     def __init__(self, role, text, images=None, parent=None):
         super(ChatBubble, self).__init__(parent)
         self.role = role
+        self._full_text = text
+        self._is_collapsed = True
         is_user = (role == "user")
 
-        self.setStyleSheet(
-            "QFrame {{ background-color: {}; border-radius: 8px; padding: 8px; }}".format(
-                "#2a3a5c" if is_user else "#333333"
+        if is_user:
+            # ---- User message: compact bar, right-aligned, max 3 lines ----
+            self.setStyleSheet(
+                "QFrame { background-color: #2a2a2a; border: none; "
+                "border-radius: 16px; padding: 0px; }"
             )
-        )
+            # Shrink-to-content but cap at a reasonable max
+            self.setSizePolicy(QtWidgets.QSizePolicy.Preferred,
+                               QtWidgets.QSizePolicy.Preferred)
 
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(10, 6, 10, 6)
-        layout.setSpacing(4)
+            layout = QtWidgets.QHBoxLayout(self)
+            layout.setContentsMargins(12, 6, 12, 6)
+            layout.setSpacing(6)
 
-        # Role label
-        role_label = QtWidgets.QLabel("You" if is_user else "Gemini")
-        role_label.setStyleSheet(
-            "color: {}; font-size: 10px; font-weight: bold;".format(
-                "#6a9fff" if is_user else "#66bb6a"
+            # Copy icon on the left — custom painted widget inside a button
+            self._copy_icon = _CopyIconWidget(size=16, color="#888888")
+            self._copy_btn = QtWidgets.QPushButton()
+            self._copy_btn.setFixedSize(22, 22)
+            self._copy_btn.setToolTip("Copy to clipboard")
+            self._copy_btn.setCursor(QtCore.Qt.PointingHandCursor)
+            self._copy_btn.setStyleSheet(
+                "QPushButton { background: transparent; border: none; padding: 0px; }"
             )
-        )
-        layout.addWidget(role_label)
+            # Place icon inside button via layout
+            btn_layout = QtWidgets.QHBoxLayout(self._copy_btn)
+            btn_layout.setContentsMargins(3, 3, 3, 3)
+            btn_layout.addWidget(self._copy_icon)
+            self._copy_btn.clicked.connect(self._copy_text)
+            layout.addWidget(self._copy_btn, 0, QtCore.Qt.AlignTop)
 
-        # Show attached images (thumbnails)
-        if images:
-            img_row = QtWidgets.QHBoxLayout()
-            img_row.setSpacing(4)
-            for img_path in images:
-                if os.path.isfile(img_path):
-                    thumb = QtWidgets.QLabel()
-                    pix = QtGui.QPixmap(img_path)
-                    if not pix.isNull():
-                        pix = pix.scaled(80, 80, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
-                        thumb.setPixmap(pix)
-                        thumb.setFixedSize(pix.width(), pix.height())
-                        img_row.addWidget(thumb)
-            img_row.addStretch()
-            layout.addLayout(img_row)
+            # Right side: text + optional expand toggle (vertical)
+            right_col = QtWidgets.QVBoxLayout()
+            right_col.setContentsMargins(0, 0, 0, 0)
+            right_col.setSpacing(2)
 
-        # Message text
-        self.msg_label = QtWidgets.QLabel(text)
-        self.msg_label.setWordWrap(True)
-        self.msg_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        self.msg_label.setStyleSheet("color: #eeeeee; font-size: 12px; background: transparent;")
-        layout.addWidget(self.msg_label)
+            # Show attached images (thumbnails) inline
+            if images:
+                img_row = QtWidgets.QHBoxLayout()
+                img_row.setSpacing(4)
+                for img_path in images:
+                    if os.path.isfile(img_path):
+                        thumb = QtWidgets.QLabel()
+                        pix = QtGui.QPixmap(img_path)
+                        if not pix.isNull():
+                            pix = pix.scaled(32, 32, QtCore.Qt.KeepAspectRatio,
+                                             QtCore.Qt.SmoothTransformation)
+                            thumb.setPixmap(pix)
+                            thumb.setFixedSize(pix.width(), pix.height())
+                            thumb.setStyleSheet("background: transparent;")
+                            img_row.addWidget(thumb)
+                img_row.addStretch()
+                right_col.addLayout(img_row)
 
-        # Copy button (only for model/assistant replies)
-        if not is_user:
+            # Message text label
+            self.msg_label = QtWidgets.QLabel("")
+            self.msg_label.setWordWrap(True)
+            self.msg_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            self.msg_label.setStyleSheet(
+                "color: #eeeeee; font-size: 12px; background: transparent;"
+            )
+            right_col.addWidget(self.msg_label)
+
+            # Expand / collapse toggle (▼ / ▲)
+            self._toggle_btn = QtWidgets.QPushButton("▼")
+            self._toggle_btn.setFixedHeight(16)
+            self._toggle_btn.setCursor(QtCore.Qt.PointingHandCursor)
+            self._toggle_btn.setStyleSheet(
+                "QPushButton { background: transparent; border: none; "
+                "color: #888888; font-size: 10px; padding: 0px; }"
+                "QPushButton:hover { color: #ffffff; }"
+            )
+            self._toggle_btn.clicked.connect(self._toggle_expand)
+            self._toggle_btn.setVisible(False)
+            right_col.addWidget(self._toggle_btn, 0, QtCore.Qt.AlignHCenter)
+
+            layout.addLayout(right_col)
+
+            # Apply collapsed text
+            self._apply_collapsed_text(text)
+
+        else:
+            # ---- Gemini message: original card style ----
+            self.setStyleSheet(
+                "QFrame { background-color: #333333; border-radius: 8px; padding: 8px; }"
+            )
+
+            layout = QtWidgets.QVBoxLayout(self)
+            layout.setContentsMargins(10, 6, 10, 6)
+            layout.setSpacing(4)
+
+            # Role label
+            role_label = QtWidgets.QLabel("Gemini")
+            role_label.setStyleSheet(
+                "color: #66bb6a; font-size: 10px; font-weight: bold;"
+            )
+            layout.addWidget(role_label)
+
+            # Message text
+            self.msg_label = QtWidgets.QLabel(text)
+            self.msg_label.setWordWrap(True)
+            self.msg_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            self.msg_label.setStyleSheet("color: #eeeeee; font-size: 12px; background: transparent;")
+            layout.addWidget(self.msg_label)
+
+            # Copy button
             copy_row = QtWidgets.QHBoxLayout()
             copy_row.setContentsMargins(0, 2, 0, 0)
             copy_row.addStretch()
@@ -313,13 +413,75 @@ class ChatBubble(QtWidgets.QFrame):
             copy_row.addWidget(self._copy_btn)
             layout.addLayout(copy_row)
 
+    # ---- User bubble: collapse / expand helpers ----------------------------
+
+    def _needs_collapse(self, text):
+        """Return True if *text* exceeds _MAX_USER_LINES lines."""
+        lines = text.split("\n")
+        if len(lines) > self._MAX_USER_LINES:
+            return True
+        # Also check if word-wrap causes more than 3 visual lines
+        fm = QtGui.QFontMetrics(self.msg_label.font())
+        max_w = self.maximumWidth()
+        if max_w >= 16777215:  # Qt default QWIDGETSIZE_MAX — means no constraint
+            max_w = 500
+        # Subtract padding / icon space
+        max_w = max(100, max_w - 50)
+        total_lines = 0
+        for line in lines:
+            if not line:
+                total_lines += 1
+            else:
+                line_w = fm.horizontalAdvance(line) if hasattr(fm, 'horizontalAdvance') else fm.width(line)
+                total_lines += max(1, int((line_w + max_w - 1) / max_w))
+        return total_lines > self._MAX_USER_LINES
+
+    def _collapsed_text(self, text):
+        """Return the first _MAX_USER_LINES logical lines, trimmed."""
+        lines = text.split("\n")
+        kept = lines[:self._MAX_USER_LINES]
+        result = "\n".join(kept)
+        if len(result) > 200:
+            result = result[:200]
+        return result + " …"
+
+    def _apply_collapsed_text(self, text):
+        """Set label text, show/hide toggle button."""
+        self._full_text = text
+        if self.role != "user":
+            self.msg_label.setText(text)
+            return
+        if self._needs_collapse(text):
+            if self._is_collapsed:
+                self.msg_label.setText(self._collapsed_text(text))
+                self._toggle_btn.setText("▼")
+                self._toggle_btn.setToolTip("Expand")
+            else:
+                self.msg_label.setText(text)
+                self._toggle_btn.setText("▲")
+                self._toggle_btn.setToolTip("Collapse")
+            self._toggle_btn.setVisible(True)
+        else:
+            self.msg_label.setText(text)
+            self._toggle_btn.setVisible(False)
+            self._is_collapsed = True
+
+    def _toggle_expand(self):
+        self._is_collapsed = not self._is_collapsed
+        self._apply_collapsed_text(self._full_text)
+
     def _copy_text(self):
-        """Copy the message text to clipboard."""
-        text = self.msg_label.text()
+        """Copy the full message text to clipboard."""
+        text = self._full_text if hasattr(self, "_full_text") else self.msg_label.text()
         clipboard = QtWidgets.QApplication.clipboard()
         clipboard.setText(text)
         # Brief visual feedback
-        if hasattr(self, "_copy_btn") and _isValid(self._copy_btn):
+        if self.role == "user" and hasattr(self, "_copy_icon") and _isValid(self._copy_icon):
+            self._copy_icon.set_color("#66bb6a")  # green flash
+            QtCore.QTimer.singleShot(1500, lambda: (
+                self._copy_icon.set_color("#888888") if _isValid(self._copy_icon) else None
+            ))
+        elif hasattr(self, "_copy_btn") and _isValid(self._copy_btn):
             self._copy_btn.setText("✓ Copied")
             QtCore.QTimer.singleShot(1500, lambda: (
                 self._copy_btn.setText("📋 Copy") if _isValid(self._copy_btn) else None
@@ -327,7 +489,11 @@ class ChatBubble(QtWidgets.QFrame):
 
     def set_text(self, text):
         """Update the displayed message text (used for streaming)."""
-        self.msg_label.setText(text)
+        if self.role == "user" and hasattr(self, "_toggle_btn"):
+            self._apply_collapsed_text(text)
+        else:
+            self._full_text = text
+            self.msg_label.setText(text)
 
     def mousePressEvent(self, event):
         """When user clicks on the bubble, give focus to the parent scroll area
@@ -732,8 +898,7 @@ class GeminiChatPanel(QtWidgets.QWidget):
                 msg["text"],
                 images=msg.get("images"),
             )
-            # Insert before the stretch at the end
-            self._chat_layout.insertWidget(self._chat_layout.count() - 1, bubble)
+            self._insert_bubble_widget(bubble, msg["role"])
 
         # Scroll to bottom
         QtCore.QTimer.singleShot(50, self._scroll_to_bottom)
@@ -742,11 +907,31 @@ class GeminiChatPanel(QtWidgets.QWidget):
 
     def _add_bubble(self, role, text, images=None):
         bubble = ChatBubble(role, text, images=images)
-        self._chat_layout.insertWidget(self._chat_layout.count() - 1, bubble)
+        self._insert_bubble_widget(bubble, role)
         QtCore.QTimer.singleShot(50, self._scroll_to_bottom)
         # Install event filters on the new bubble and its children
         QtCore.QTimer.singleShot(100, self._scroll_area.install_filters)
         return bubble
+
+    def _insert_bubble_widget(self, bubble, role):
+        """Insert a bubble into the chat layout.
+        User bubbles are right-aligned via a wrapper with leading stretch."""
+        if role == "user":
+            # Cap user bubble width to 85% of the visible chat area
+            area_w = self._scroll_area.viewport().width()
+            max_bubble_w = max(300, int(area_w * 0.85))
+            bubble.setMaximumWidth(max_bubble_w)
+
+            wrapper = QtWidgets.QWidget()
+            wrapper.setStyleSheet("background: transparent;")
+            h = QtWidgets.QHBoxLayout(wrapper)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(0)
+            h.addStretch()
+            h.addWidget(bubble)
+            self._chat_layout.insertWidget(self._chat_layout.count() - 1, wrapper)
+        else:
+            self._chat_layout.insertWidget(self._chat_layout.count() - 1, bubble)
 
     def _scroll_to_bottom(self):
         vbar = self._scroll_area.verticalScrollBar()
