@@ -361,22 +361,6 @@ class ChatBubble(QtWidgets.QFrame):
             layout.setContentsMargins(12, 6, 12, 6)
             layout.setSpacing(6)
 
-            # Copy icon on the left — custom painted widget inside a button
-            self._copy_icon = _CopyIconWidget(size=16, color="#888888")
-            self._copy_btn = QtWidgets.QPushButton()
-            self._copy_btn.setFixedSize(22, 22)
-            self._copy_btn.setToolTip("Copy to clipboard")
-            self._copy_btn.setCursor(QtCore.Qt.PointingHandCursor)
-            self._copy_btn.setStyleSheet(
-                "QPushButton { background: transparent; border: none; padding: 0px; }"
-            )
-            # Place icon inside button via layout
-            btn_layout = QtWidgets.QHBoxLayout(self._copy_btn)
-            btn_layout.setContentsMargins(3, 3, 3, 3)
-            btn_layout.addWidget(self._copy_icon)
-            self._copy_btn.clicked.connect(self._copy_text)
-            layout.addWidget(self._copy_btn, 0, QtCore.Qt.AlignTop)
-
             # Right side: text + optional expand toggle (vertical)
             right_col = QtWidgets.QVBoxLayout()
             right_col.setContentsMargins(0, 0, 0, 0)
@@ -1117,7 +1101,27 @@ class GeminiChatPanel(QtWidgets.QWidget):
             wrapper.setStyleSheet("background: transparent;")
             h = QtWidgets.QHBoxLayout(wrapper)
             h.setContentsMargins(0, 0, 0, 0)
-            h.setSpacing(0)
+            h.setSpacing(6)
+
+            # Copy button outside the bubble, centered vertically
+            copy_icon = _CopyIconWidget(size=16, color="#888888")
+            copy_btn = QtWidgets.QPushButton()
+            copy_btn.setFixedSize(22, 22)
+            copy_btn.setToolTip("Copy to clipboard")
+            copy_btn.setCursor(QtCore.Qt.PointingHandCursor)
+            copy_btn.setStyleSheet(
+                "QPushButton { background: transparent; border: none; padding: 0px; }"
+            )
+            btn_layout = QtWidgets.QHBoxLayout(copy_btn)
+            btn_layout.setContentsMargins(3, 3, 3, 3)
+            btn_layout.addWidget(copy_icon)
+            copy_btn.clicked.connect(bubble._copy_text)
+            # Store references on bubble for feedback
+            bubble._copy_icon = copy_icon
+            bubble._copy_btn = copy_btn
+
+            h.addStretch()
+            h.addWidget(copy_btn, 0, QtCore.Qt.AlignVCenter)
             h.addWidget(bubble, 0, QtCore.Qt.AlignRight)
             self._chat_layout.insertWidget(self._chat_layout.count() - 1, wrapper)
 
