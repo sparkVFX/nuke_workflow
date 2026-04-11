@@ -537,22 +537,72 @@ class ChatBubble(QtWidgets.QFrame):
 # ---------------------------------------------------------------------------
 # Image Thumbnail Strip
 # ---------------------------------------------------------------------------
+class _ThumbCard(QtWidgets.QFrame):
+    """Single thumbnail card: image + filename label.
+    A centered '✕' remove button appears only on mouse hover."""
+
+    removeClicked = QtCore.Signal(str)  # emits image path
+
+    def __init__(self, img_path, parent=None):
+        super(_ThumbCard, self).__init__(parent)
+        self._img_path = img_path
+        self.setFixedSize(64, 64)
+        self.setStyleSheet("QFrame { background: #333; border-radius: 4px; }")
+
+        # -- thumbnail --
+        self._thumb = QtWidgets.QLabel(self)
+        pix = QtGui.QPixmap(img_path)
+        if not pix.isNull():
+            pix = pix.scaled(60, 60, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+            self._thumb.setPixmap(pix)
+        self._thumb.setFixedSize(60, 60)
+        self._thumb.setAlignment(QtCore.Qt.AlignCenter)
+        self._thumb.move(2, 2)
+
+        # -- remove button (centered over thumbnail, hidden by default) --
+        self._remove_btn = QtWidgets.QPushButton("✕", self)
+        self._remove_btn.setFixedSize(22, 22)
+        self._remove_btn.setStyleSheet(
+            "QPushButton { background: rgba(239,68,68,200); color: white; border: none; "
+            "border-radius: 11px; font-size: 11px; font-weight: bold; }"
+            "QPushButton:hover { background: rgba(220,38,38,240); }"
+        )
+        # Center the button over the thumbnail area (thumb is 60x60 at (2,2))
+        btn_x = 2 + (60 - 22) // 2  # = 21
+        btn_y = 2 + (60 - 22) // 2  # = 21
+        self._remove_btn.move(btn_x, btn_y)
+        self._remove_btn.hide()
+        self._remove_btn.clicked.connect(lambda: self.removeClicked.emit(self._img_path))
+
+    def enterEvent(self, event):
+        self._remove_btn.show()
+        super(_ThumbCard, self).enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._remove_btn.hide()
+        super(_ThumbCard, self).leaveEvent(event)
+
+
 class ImageStrip(QtWidgets.QWidget):
-    """Shows thumbnails of attached images with remove buttons.
-    When more than _MAX_VISIBLE thumbnails exist, the extras are shown as
-    a compact 'img3, img4 ...' label to save space."""
+    """Shows thumbnails of attached images with a '+' add-local-file button
+    always at the end.  When more than _MAX_VISIBLE thumbnails exist, the
+    extras are shown as a compact 'img3, img4 ...' label to save space."""
 
     imagesChanged = QtCore.Signal()
     _MAX_VISIBLE = 3  # show full thumbnails for up to this many
 
-    def __init__(self, parent=None):
+    def __init__(self, add_callback=None, parent=None):
         super(ImageStrip, self).__init__(parent)
         self._images = []  # list of file paths
+        self._add_callback = add_callback  # called when "+" is clicked
+
         self._layout = QtWidgets.QHBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(4)
-        self._layout.addStretch()
-        self.setFixedHeight(0)  # hidden initially
+        self._layout.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+
+        # Build initial state (just the "+" button)
+        self._rebuild()
 
     @property
     def images(self):
@@ -577,50 +627,14 @@ class ImageStrip(QtWidgets.QWidget):
             if w:
                 w.deleteLater()
 
-        if not self._images:
-            self._layout.addStretch()
-            self.setFixedHeight(0)
-            return
-
         # Show full thumbnails up to _MAX_VISIBLE
         visible = self._images[:self._MAX_VISIBLE]
         overflow = self._images[self._MAX_VISIBLE:]
 
         for idx, img_path in enumerate(visible):
-            frame = QtWidgets.QFrame()
-            frame.setStyleSheet("QFrame { background: #333; border-radius: 4px; }")
-            fl = QtWidgets.QVBoxLayout(frame)
-            fl.setContentsMargins(2, 2, 2, 2)
-            fl.setSpacing(1)
-
-            thumb = QtWidgets.QLabel()
-            pix = QtGui.QPixmap(img_path)
-            if not pix.isNull():
-                pix = pix.scaled(60, 60, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
-                thumb.setPixmap(pix)
-            thumb.setFixedSize(60, 60)
-            thumb.setAlignment(QtCore.Qt.AlignCenter)
-            fl.addWidget(thumb)
-
-            # Filename label
-            basename = os.path.basename(img_path)
-            name_short = basename if len(basename) <= 10 else basename[:8] + ".."
-            name_lbl = QtWidgets.QLabel(name_short)
-            name_lbl.setStyleSheet("color: #aaa; font-size: 9px; background: transparent;")
-            name_lbl.setAlignment(QtCore.Qt.AlignCenter)
-            fl.addWidget(name_lbl)
-
-            remove_btn = QtWidgets.QPushButton("✕")
-            remove_btn.setFixedSize(18, 18)
-            remove_btn.setStyleSheet(
-                "QPushButton { background: #ef4444; color: white; border: none; "
-                "border-radius: 9px; font-size: 10px; font-weight: bold; }"
-                "QPushButton:hover { background: #dc2626; }"
-            )
-            remove_btn.clicked.connect(lambda checked=False, p=img_path: self._remove(p))
-            fl.addWidget(remove_btn, alignment=QtCore.Qt.AlignCenter)
-
-            self._layout.addWidget(frame)
+            card = _ThumbCard(img_path)
+            card.removeClicked.connect(self._remove)
+            self._layout.addWidget(card)
 
         # If there are overflow images, show a compact label like "img4, img5 ..."
         if overflow:
@@ -661,8 +675,21 @@ class ImageStrip(QtWidgets.QWidget):
 
             self._layout.addWidget(overflow_frame)
 
-        self._layout.addStretch()
-        self.setFixedHeight(100 if self._images else 0)
+        # Always show the "+" button at the end of the image row
+        add_btn = QtWidgets.QPushButton("+")
+        add_btn.setFixedSize(40, 40)
+        add_btn.setToolTip("Add local file (images & documents)")
+        add_btn.setStyleSheet(
+            "QPushButton { background: #333; color: #e74c3c; border: 2px solid #555; "
+            "border-radius: 6px; font-size: 22px; font-weight: bold; }"
+            "QPushButton:hover { background: #444; border-color: #e74c3c; }"
+        )
+        if self._add_callback:
+            add_btn.clicked.connect(self._add_callback)
+        self._layout.addWidget(add_btn, alignment=QtCore.Qt.AlignVCenter)
+
+        # Set height: show the strip always (for the + button), taller when images exist
+        self.setFixedHeight(72 if self._images else 48)
 
     def _remove(self, path):
         if path in self._images:
@@ -817,7 +844,7 @@ class GeminiChatPanel(QtWidgets.QWidget):
         input_section = QtWidgets.QVBoxLayout()
         input_section.setSpacing(4)
 
-        # Row 1: Input label + Select + Paste + Nuke(+) + stretch + Model combo
+        # Row 1: Input label + Select(Nuke node) + Paste + stretch + Model combo
         toolbar_row = QtWidgets.QHBoxLayout()
         toolbar_row.setSpacing(4)
 
@@ -827,8 +854,8 @@ class GeminiChatPanel(QtWidgets.QWidget):
 
         select_btn = QtWidgets.QPushButton("Select")
         select_btn.setObjectName("actionBtn")
-        select_btn.setToolTip("Upload local file (images & documents)")
-        select_btn.clicked.connect(self._select_image)
+        select_btn.setToolTip("Select image from Nuke Node Graph node")
+        select_btn.clicked.connect(self._grab_nuke_node)
         toolbar_row.addWidget(select_btn)
 
         paste_btn = QtWidgets.QPushButton("Paste")
@@ -836,13 +863,6 @@ class GeminiChatPanel(QtWidgets.QWidget):
         paste_btn.setToolTip("Paste image from clipboard")
         paste_btn.clicked.connect(self._paste_image)
         toolbar_row.addWidget(paste_btn)
-
-        nuke_btn = QtWidgets.QPushButton("+")
-        nuke_btn.setObjectName("actionBtn")
-        nuke_btn.setFixedWidth(28)
-        nuke_btn.setToolTip("Add image from selected Nuke Node Graph node")
-        nuke_btn.clicked.connect(self._grab_nuke_node)
-        toolbar_row.addWidget(nuke_btn)
 
         toolbar_row.addStretch()
 
@@ -855,8 +875,8 @@ class GeminiChatPanel(QtWidgets.QWidget):
 
         input_section.addLayout(toolbar_row)
 
-        # Row 2: Image strip (thumbnails, collapses when empty)
-        self._image_strip = ImageStrip()
+        # Row 2: Image strip (thumbnails + "+" add button at the end, same row as Select/Paste)
+        self._image_strip = ImageStrip(add_callback=self._select_image)
         input_section.addWidget(self._image_strip)
 
         # Row 3: Text input
