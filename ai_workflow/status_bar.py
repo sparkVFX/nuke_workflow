@@ -355,7 +355,7 @@ def deferred_install():
                 _df3.write("install() finished. _installed={}, _widget={}\n".format(
                     task_progress_manager._installed, task_progress_manager._widget))
             # Show a brief test task so user can verify widget works at startup
-            _test_tid = task_progress_manager.add_task("AI_Workflow", "image")
+            _test_tid = task_progress_manager.add_task("CompMind", "image")
             task_progress_manager.update_status(_test_tid, "Status bar ready!", progress=100)
             # Auto-hide test task after 8 seconds
             QtCore.QTimer.singleShot(8000,

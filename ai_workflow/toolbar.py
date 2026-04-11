@@ -42,6 +42,15 @@ def create_node_generate_video_seedance():
     nuke.message("Generate Video Seedance node created.")
 
 
+def create_node_generate_video_kling():
+    """Generate Video Kling - creates a NoOp node as placeholder."""
+    node = nuke.createNode("NoOp")
+    node.setName("GenerateVideo_Kling")
+    node["label"].setValue("Generate Video\nKling")
+    node["tile_color"].setValue(0x20B2AAFF)
+    nuke.message("Generate Video Kling: coming soon!")
+
+
 def open_settings():
     """Open the shared AI Workflow settings dialog (API key, temp directory)."""
     from ai_workflow.nanobanana import NanoBananaSettingsDialog
@@ -121,18 +130,18 @@ def register_toolbar():
 
     # Create a new toolbar in the Nodes toolbar (left sidebar)
     toolbar = nuke.toolbar("Nodes")
-    ai_menu = toolbar.addMenu("AI Workflow", icon="ai_workflow.png")
+    ai_menu = toolbar.addMenu("CompMind", icon="CompMind_Logo.png")
 
     # Add the buttons to the toolbar menu
     ai_menu.addCommand(
         "Generate Dialogue Gemini",
         "ai_workflow.toolbar.open_gemini_dialogue()",
-        icon="GeminiChat.png",
+        icon="Gemini.png",
     )
     ai_menu.addCommand(
         "Generate Image NanoBanana",
         "ai_workflow.toolbar.create_node_generate_image_nanobanana()",
-        icon="NanoBanana.png",
+        icon="Banana.png",
     )
     ai_menu.addCommand(
         "Generate Video VEO",
@@ -145,15 +154,17 @@ def register_toolbar():
         icon="Seedance.png",
     )
     ai_menu.addCommand(
+        "Generate Video Kling",
+        "ai_workflow.toolbar.create_node_generate_video_kling()",
+        icon="Kling.png",
+    )
+    ai_menu.addCommand(
         "Setting",
         "ai_workflow.toolbar.open_settings()",
-        icon="Settings.png",
+        icon="Setting.png",
     )
     ai_menu.addCommand(
-        "Send to Studio",
+        "Send To Sequence",
         "ai_workflow.toolbar.send_selected_to_studio()",
-    )
-    ai_menu.addCommand(
-        "VEO Player",
-        "ai_workflow.toolbar.create_veo_player()",
+        icon="SendTo.png",
     )

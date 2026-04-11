@@ -566,8 +566,8 @@ def render_input_to_file_silent(input_node, output_path, frame=None):
         write.setInput(0, input_node)
         write["file"].setValue(output_path.replace("\\", "/"))
         write["file_type"].setValue("png")
-        write["channels"].setValue("rgba")
-        
+        write["channels"].setValue("rgb")
+
         # Hide from DAG
         write["xpos"].setValue(-10000)
         write["ypos"].setValue(-10000)
@@ -1567,7 +1567,7 @@ class NanoBananaWidget(QtWidgets.QWidget):
         if not self.settings.api_key:
             self.status_label.setStyleSheet("color: #ef4444; font-size: 11px;")
             self.status_label.setText("Please set API key in Settings")
-            nuke.message("API key not set.\nPlease open AI Workflow > Setting in the toolbar.")
+            nuke.message("API key not set.\nPlease open CompMind > Setting in the toolbar.")
             return
         
         if self.current_worker and self.current_worker.is_running:
@@ -2131,7 +2131,7 @@ class NanoBananaPromptWidget(QtWidgets.QWidget):
         if not self.settings.api_key:
             self.status_label.setStyleSheet("color: #ef4444; font-size: 11px;")
             self.status_label.setText("Please set API key in Settings")
-            nuke.message("API key not set.\nPlease open AI Workflow > Setting in the toolbar.")
+            nuke.message("API key not set.\nPlease open CompMind > Setting in the toolbar.")
             return
 
         if self.current_worker and self.current_worker.is_running:

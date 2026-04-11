@@ -1548,7 +1548,7 @@ class VeoWidget(QtWidgets.QWidget):
         if not self.settings.api_key:
             self.status_label.setStyleSheet("color: #ef4444; font-size: 11px;")
             self.status_label.setText("Please set API key in Settings")
-            nuke.message("API key not set.\nPlease open AI Workflow > Setting in the toolbar.")
+            nuke.message("API key not set.\nPlease open CompMind > Setting in the toolbar.")
             return
 
         if self.current_worker and self.current_worker.is_running:
@@ -2095,7 +2095,7 @@ class VeoRecordWidget(QtWidgets.QWidget):
         if not self.settings.api_key:
             self.status_label.setStyleSheet("color: #ef4444; font-size: 11px;")
             self.status_label.setText("Please set API key in Settings")
-            nuke.message("API key not set.\nPlease open AI Workflow > Setting in the toolbar.")
+            nuke.message("API key not set.\nPlease open CompMind > Setting in the toolbar.")
             return
 
         if self.current_worker and self.current_worker.is_running:
