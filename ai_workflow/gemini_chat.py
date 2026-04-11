@@ -329,6 +329,17 @@ class ChatBubble(QtWidgets.QFrame):
         """Update the displayed message text (used for streaming)."""
         self.msg_label.setText(text)
 
+    def mousePressEvent(self, event):
+        """When user clicks on the bubble, give focus to the parent scroll area
+        so that mouse-wheel scrolling works immediately."""
+        parent = self.parent()
+        while parent is not None:
+            if isinstance(parent, QtWidgets.QScrollArea):
+                parent.setFocus(QtCore.Qt.MouseFocusReason)
+                break
+            parent = parent.parent()
+        super(ChatBubble, self).mousePressEvent(event)
+
 
 # ---------------------------------------------------------------------------
 # Image Thumbnail Strip
@@ -410,6 +421,78 @@ class ImageStrip(QtWidgets.QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Scroll Area that grabs focus on click / wheel so middle-mouse scrolling
+# works regardless of which child widget the cursor is over.
+# ---------------------------------------------------------------------------
+class _WheelScrollArea(QtWidgets.QScrollArea):
+    """QScrollArea that intercepts mouse-click and wheel events from ALL
+    child widgets so that scrolling works no matter where the cursor is."""
+
+    def __init__(self, parent=None):
+        super(_WheelScrollArea, self).__init__(parent)
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self._handling_wheel = False  # prevent re-entrant wheel handling
+
+    # -- public: call after adding new children (e.g. chat bubbles) ----------
+    def install_filters(self):
+        """(Re-)install the event filter on the inner widget and every
+        descendant.  Call this after adding / rebuilding chat bubbles."""
+        inner = self.widget()
+        if inner and _isValid(inner):
+            inner.installEventFilter(self)
+            for child in inner.findChildren(QtWidgets.QWidget):
+                child.installEventFilter(self)
+
+    # -- Override setWidget to auto-install filters --------------------------
+    def setWidget(self, widget):
+        super(_WheelScrollArea, self).setWidget(widget)
+        self.install_filters()
+
+    # -- Intercept child events ----------------------------------------------
+    def eventFilter(self, obj, event):
+        etype = event.type()
+        if etype == QtCore.QEvent.MouseButtonPress:
+            self.setFocus(QtCore.Qt.MouseFocusReason)
+        elif etype == QtCore.QEvent.Wheel:
+            if not self._handling_wheel:
+                self._handling_wheel = True
+                self.setFocus(QtCore.Qt.MouseFocusReason)
+                self._do_wheel(event)
+                self._handling_wheel = False
+            return True  # always consume to stop further propagation
+        return super(_WheelScrollArea, self).eventFilter(obj, event)
+
+    # -- Own events ----------------------------------------------------------
+    def mousePressEvent(self, event):
+        self.setFocus(QtCore.Qt.MouseFocusReason)
+        super(_WheelScrollArea, self).mousePressEvent(event)
+
+    def wheelEvent(self, event):
+        if not self._handling_wheel:
+            self._handling_wheel = True
+            self.setFocus(QtCore.Qt.MouseFocusReason)
+            super(_WheelScrollArea, self).wheelEvent(event)
+            self._handling_wheel = False
+        else:
+            event.accept()  # already handled, just consume
+
+    # -- Manual wheel scroll -------------------------------------------------
+    def _do_wheel(self, event):
+        vbar = self.verticalScrollBar()
+        if not vbar:
+            return
+        try:
+            delta = event.angleDelta().y()
+        except AttributeError:
+            delta = event.delta()
+        # Scroll 3 lines per notch (120 units = 1 notch), smooth feel
+        pixels_per_line = 20
+        notches = delta / 120.0
+        scroll_amount = int(notches * pixels_per_line * 3)
+        vbar.setValue(vbar.value() - scroll_amount)
+
+
+# ---------------------------------------------------------------------------
 # Main Chat Panel
 # ---------------------------------------------------------------------------
 class GeminiChatPanel(QtWidgets.QWidget):
@@ -465,9 +548,10 @@ class GeminiChatPanel(QtWidgets.QWidget):
         root_layout.addLayout(top_bar)
 
         # ---- Chat area ----
-        self._scroll_area = QtWidgets.QScrollArea()
+        self._scroll_area = _WheelScrollArea()
         self._scroll_area.setWidgetResizable(True)
         self._scroll_area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self._scroll_area.setFocusPolicy(QtCore.Qt.StrongFocus)
 
         self._chat_container = QtWidgets.QWidget()
         self._chat_layout = QtWidgets.QVBoxLayout(self._chat_container)
@@ -653,11 +737,15 @@ class GeminiChatPanel(QtWidgets.QWidget):
 
         # Scroll to bottom
         QtCore.QTimer.singleShot(50, self._scroll_to_bottom)
+        # Re-install event filters so new bubbles respond to click/wheel
+        QtCore.QTimer.singleShot(100, self._scroll_area.install_filters)
 
     def _add_bubble(self, role, text, images=None):
         bubble = ChatBubble(role, text, images=images)
         self._chat_layout.insertWidget(self._chat_layout.count() - 1, bubble)
         QtCore.QTimer.singleShot(50, self._scroll_to_bottom)
+        # Install event filters on the new bubble and its children
+        QtCore.QTimer.singleShot(100, self._scroll_area.install_filters)
         return bubble
 
     def _scroll_to_bottom(self):
