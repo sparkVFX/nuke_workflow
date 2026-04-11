@@ -268,8 +268,9 @@ class TaskProgressManager(object):
                 status_bar.objectName(), type(status_bar).__name__))
 
             self._widget = _TaskProgressWidget(parent=status_bar)
-            # addPermanentWidget adds to the right side and stays visible
-            status_bar.addPermanentWidget(self._widget)
+            # addWidget places widget on the LEFT side of the status bar
+            # (addPermanentWidget would place it on the right)
+            status_bar.addWidget(self._widget)
             self._installed = True
             print("[AI Status Bar] Progress widget installed successfully!")
         except Exception as e:
