@@ -24,6 +24,7 @@ except ImportError:
             return True
 
 import nuke
+import nukescripts
 import os
 import sys
 import json
@@ -142,6 +143,19 @@ QPushButton#deleteBtn {
 }
 QPushButton#deleteBtn:hover {
     background-color: #dc2626;
+}
+QPushButton#copyBtn {
+    background-color: transparent;
+    color: #999999;
+    border: 1px solid #555555;
+    border-radius: 3px;
+    padding: 2px 8px;
+    font-size: 10px;
+}
+QPushButton#copyBtn:hover {
+    background-color: #404040;
+    color: #ffffff;
+    border-color: #777777;
 }
 QScrollArea {
     border: none;
@@ -285,6 +299,31 @@ class ChatBubble(QtWidgets.QFrame):
         self.msg_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         self.msg_label.setStyleSheet("color: #eeeeee; font-size: 12px; background: transparent;")
         layout.addWidget(self.msg_label)
+
+        # Copy button (only for model/assistant replies)
+        if not is_user:
+            copy_row = QtWidgets.QHBoxLayout()
+            copy_row.setContentsMargins(0, 2, 0, 0)
+            copy_row.addStretch()
+            self._copy_btn = QtWidgets.QPushButton("📋 Copy")
+            self._copy_btn.setObjectName("copyBtn")
+            self._copy_btn.setToolTip("Copy this response to clipboard")
+            self._copy_btn.setCursor(QtCore.Qt.PointingHandCursor)
+            self._copy_btn.clicked.connect(self._copy_text)
+            copy_row.addWidget(self._copy_btn)
+            layout.addLayout(copy_row)
+
+    def _copy_text(self):
+        """Copy the message text to clipboard."""
+        text = self.msg_label.text()
+        clipboard = QtWidgets.QApplication.clipboard()
+        clipboard.setText(text)
+        # Brief visual feedback
+        if hasattr(self, "_copy_btn") and _isValid(self._copy_btn):
+            self._copy_btn.setText("✓ Copied")
+            QtCore.QTimer.singleShot(1500, lambda: (
+                self._copy_btn.setText("📋 Copy") if _isValid(self._copy_btn) else None
+            ))
 
     def set_text(self, text):
         """Update the displayed message text (used for streaming)."""
@@ -829,36 +868,58 @@ class GeminiChatPanel(QtWidgets.QWidget):
 
 
 # ---------------------------------------------------------------------------
-# Panel singleton (floating window)
+# Nuke Panel Registration — embeds into Nuke's panel system as a tab
 # ---------------------------------------------------------------------------
-_gemini_chat_window = None
+
+# Store a reference so we can locate it later
+_gemini_panel_instance = None
+
+
+def _create_gemini_panel_widget():
+    """Factory function called by Nuke's panel system to create the widget."""
+    global _gemini_panel_instance
+    _gemini_panel_instance = GeminiChatPanel()
+    return _gemini_panel_instance
+
+
+def register_gemini_panel():
+    """Register GeminiChatPanel as a Nuke panel so it can be added as a tab.
+    Call this once at startup (e.g. from menu.py or init.py).
+    """
+    try:
+        nukescripts.panels.registerWidgetAsPanel(
+            "ai_workflow.gemini_chat._create_gemini_panel_widget",
+            "Generate Dialogue Gemini",
+            "ai_workflow.GeminiChatPanel",
+        )
+    except Exception as e:
+        print("[GeminiChat] Failed to register panel: {}".format(e))
 
 
 def open_gemini_chat_panel():
-    """Open (or bring to front) the Gemini Dialogue panel."""
-    global _gemini_chat_window
+    """Open the Gemini Dialogue panel as a tab inside an existing Nuke pane.
+    It will appear next to Properties / Scene Graph etc., not as a floating window.
+    """
+    panel_id = "ai_workflow.GeminiChatPanel"
 
-    if _gemini_chat_window is not None and _isValid(_gemini_chat_window):
-        _gemini_chat_window.raise_()
-        _gemini_chat_window.activateWindow()
-        return
-
-    _gemini_chat_window = QtWidgets.QWidget()
-    _gemini_chat_window.setWindowTitle("Generate Dialogue Gemini")
-    _gemini_chat_window.setMinimumSize(520, 600)
-    _gemini_chat_window.resize(600, 750)
-
-    # Apply dark theme background
-    _gemini_chat_window.setStyleSheet("background-color: #222222;")
-
-    layout = QtWidgets.QVBoxLayout(_gemini_chat_window)
-    layout.setContentsMargins(0, 0, 0, 0)
-
-    panel = GeminiChatPanel(_gemini_chat_window)
-    layout.addWidget(panel)
-
-    # Keep on top of Nuke main window
-    _gemini_chat_window.setWindowFlags(
-        QtCore.Qt.Window | QtCore.Qt.WindowStaysOnTopHint
+    # Create a PythonPanel instance via registerWidgetAsPanel with create=True
+    panel = nukescripts.panels.registerWidgetAsPanel(
+        "ai_workflow.gemini_chat._create_gemini_panel_widget",
+        "Generate Dialogue Gemini",
+        panel_id,
+        True,  # create=True returns a PythonPanel we can dock
     )
-    _gemini_chat_window.show()
+
+    if panel:
+        # Find a suitable pane to dock into (try Properties pane first)
+        target_pane = None
+        for pane_name in ("Properties.1", "Viewer.1", "DAG.1"):
+            target_pane = nuke.getPaneFor(pane_name)
+            if target_pane:
+                break
+
+        if target_pane:
+            panel.addToPane(target_pane)
+        else:
+            # No pane found — show as floating (addToPane with no args)
+            panel.addToPane()
