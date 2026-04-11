@@ -33,6 +33,20 @@ import base64
 import datetime
 import threading
 import traceback
+import logging
+
+# ---------------------------------------------------------------------------
+# Debug logger for layout / sizing issues
+# ---------------------------------------------------------------------------
+_log = logging.getLogger("GeminiChat.DEBUG")
+_log.setLevel(logging.DEBUG)
+if not _log.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setLevel(logging.DEBUG)
+    _handler.setFormatter(logging.Formatter(
+        "[%(name)s] %(levelname)s  %(message)s"
+    ))
+    _log.addHandler(_handler)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -306,6 +320,8 @@ class ChatBubble(QtWidgets.QFrame):
             # Shrink-to-content but cap at a reasonable max
             self.setSizePolicy(QtWidgets.QSizePolicy.Preferred,
                                QtWidgets.QSizePolicy.Preferred)
+            _log.debug("[ChatBubble.__init__] user bubble created, text length=%d, "
+                       "sizePolicy=Preferred/Preferred", len(text))
 
             layout = QtWidgets.QHBoxLayout(self)
             layout.setContentsMargins(12, 6, 12, 6)
@@ -419,14 +435,20 @@ class ChatBubble(QtWidgets.QFrame):
         """Return True if *text* exceeds _MAX_USER_LINES lines."""
         lines = text.split("\n")
         if len(lines) > self._MAX_USER_LINES:
+            _log.debug("[_needs_collapse] raw line count %d > %d => True",
+                       len(lines), self._MAX_USER_LINES)
             return True
         # Also check if word-wrap causes more than 3 visual lines
         fm = QtGui.QFontMetrics(self.msg_label.font())
-        max_w = self.maximumWidth()
+        # Prefer msg_label's maximumWidth (set in _insert_bubble_widget),
+        # fall back to self.maximumWidth(), then default 500.
+        max_w = self.msg_label.maximumWidth()
+        _log.debug("[_needs_collapse] msg_label.maximumWidth()=%d, "
+                   "self.maximumWidth()=%d", max_w, self.maximumWidth())
         if max_w >= 16777215:  # Qt default QWIDGETSIZE_MAX — means no constraint
+            max_w = self.maximumWidth()
+        if max_w >= 16777215:
             max_w = 500
-        # Subtract padding / icon space
-        max_w = max(100, max_w - 50)
         total_lines = 0
         for line in lines:
             if not line:
@@ -434,6 +456,8 @@ class ChatBubble(QtWidgets.QFrame):
             else:
                 line_w = fm.horizontalAdvance(line) if hasattr(fm, 'horizontalAdvance') else fm.width(line)
                 total_lines += max(1, int((line_w + max_w - 1) / max_w))
+        _log.debug("[_needs_collapse] computed visual lines=%d, max_w_for_calc=%d => %s",
+                   total_lines, max_w, total_lines > self._MAX_USER_LINES)
         return total_lines > self._MAX_USER_LINES
 
     def _collapsed_text(self, text):
@@ -451,7 +475,10 @@ class ChatBubble(QtWidgets.QFrame):
         if self.role != "user":
             self.msg_label.setText(text)
             return
-        if self._needs_collapse(text):
+        needs = self._needs_collapse(text)
+        _log.debug("[_apply_collapsed_text] needs_collapse=%s, is_collapsed=%s",
+                   needs, self._is_collapsed)
+        if needs:
             if self._is_collapsed:
                 self.msg_label.setText(self._collapsed_text(text))
                 self._toggle_btn.setText("▼")
@@ -906,6 +933,8 @@ class GeminiChatPanel(QtWidgets.QWidget):
         QtCore.QTimer.singleShot(100, self._scroll_area.install_filters)
 
     def _add_bubble(self, role, text, images=None):
+        _log.debug("[_add_bubble] role=%s, text_len=%d, images=%s",
+                   role, len(text), bool(images))
         bubble = ChatBubble(role, text, images=images)
         self._insert_bubble_widget(bubble, role)
         QtCore.QTimer.singleShot(50, self._scroll_to_bottom)
@@ -915,22 +944,82 @@ class GeminiChatPanel(QtWidgets.QWidget):
 
     def _insert_bubble_widget(self, bubble, role):
         """Insert a bubble into the chat layout.
-        User bubbles are right-aligned via a wrapper with leading stretch."""
+        User bubbles are right-aligned with a computed fixed width so the
+        text fills the available space instead of collapsing to minimum."""
         if role == "user":
-            # Cap user bubble width to 85% of the visible chat area
+            # Calculate usable width from the visible chat area
             area_w = self._scroll_area.viewport().width()
+            scroll_w = self._scroll_area.width()
             max_bubble_w = max(300, int(area_w * 0.85))
-            bubble.setMaximumWidth(max_bubble_w)
 
+            # Padding inside bubble: contentsMargins(12,6,12,6) + copy-btn(22) + spacing(6) = 52
+            inner_pad = 52
+            label_max_w = max(200, max_bubble_w - inner_pad)
+
+            if hasattr(bubble, 'msg_label'):
+                lbl = bubble.msg_label
+                fm = QtGui.QFontMetrics(lbl.font())
+                text = lbl.text()
+
+                # Compute the natural (no-wrap) width of each line,
+                # then pick the widest one.
+                raw_lines = text.split("\n")
+                max_text_w = 0
+                for raw_line in raw_lines:
+                    w = fm.horizontalAdvance(raw_line) if hasattr(fm, 'horizontalAdvance') else fm.width(raw_line)
+                    max_text_w = max(max_text_w, w)
+
+                # The bubble width should be:
+                #  - at least 80 px (for very short text)
+                #  - at most label_max_w (85% of viewport minus padding)
+                #  - ideally = natural text width (so short msgs stay compact)
+                ideal_label_w = min(max_text_w + 4, label_max_w)  # +4 for rounding
+                ideal_bubble_w = ideal_label_w + inner_pad
+
+                # Clamp
+                ideal_bubble_w = max(80, min(ideal_bubble_w, max_bubble_w))
+
+                # Set the label's maximumWidth so word-wrap uses it
+                lbl.setMaximumWidth(ideal_label_w)
+                # Fix the bubble to the computed width
+                bubble.setFixedWidth(ideal_bubble_w)
+
+                # Re-evaluate collapsed text now that label has correct width
+                if hasattr(bubble, '_apply_collapsed_text') and hasattr(bubble, '_full_text'):
+                    bubble._apply_collapsed_text(bubble._full_text)
+
+                _log.debug("[_insert_bubble_widget] role=user | "
+                           "scroll_area.width()=%d | viewport.width()=%d | "
+                           "max_bubble_w=%d | label_max_w=%d | "
+                           "max_text_w=%d | ideal_label_w=%d | ideal_bubble_w=%d",
+                           scroll_w, area_w, max_bubble_w, label_max_w,
+                           max_text_w, ideal_label_w, ideal_bubble_w)
+
+            # Use wrapper + layout with AlignRight to position the fixed-width bubble
             wrapper = QtWidgets.QWidget()
             wrapper.setStyleSheet("background: transparent;")
             h = QtWidgets.QHBoxLayout(wrapper)
             h.setContentsMargins(0, 0, 0, 0)
             h.setSpacing(0)
-            h.addStretch()
-            h.addWidget(bubble)
+            h.addWidget(bubble, 0, QtCore.Qt.AlignRight)
             self._chat_layout.insertWidget(self._chat_layout.count() - 1, wrapper)
+
+            # Log post-layout sizes after a short delay
+            def _log_post_layout():
+                if _isValid(bubble) and _isValid(wrapper):
+                    _log.debug("[_insert_bubble_widget] POST-LAYOUT: "
+                               "bubble.width()=%d | bubble.height()=%d | "
+                               "wrapper.width()=%d | "
+                               "msg_label.width()=%d | msg_label.height()=%d | "
+                               "msg_label.maximumWidth()=%d",
+                               bubble.width(), bubble.height(),
+                               wrapper.width(),
+                               bubble.msg_label.width() if hasattr(bubble, 'msg_label') else -1,
+                               bubble.msg_label.height() if hasattr(bubble, 'msg_label') else -1,
+                               bubble.msg_label.maximumWidth() if hasattr(bubble, 'msg_label') else -1)
+            QtCore.QTimer.singleShot(200, _log_post_layout)
         else:
+            _log.debug("[_insert_bubble_widget] role=model/assistant, no width cap")
             self._chat_layout.insertWidget(self._chat_layout.count() - 1, bubble)
 
     def _scroll_to_bottom(self):
