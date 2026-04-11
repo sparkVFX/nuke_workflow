@@ -280,11 +280,15 @@ class ChatBubble(QtWidgets.QFrame):
             layout.addLayout(img_row)
 
         # Message text
-        msg_label = QtWidgets.QLabel(text)
-        msg_label.setWordWrap(True)
-        msg_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        msg_label.setStyleSheet("color: #eeeeee; font-size: 12px; background: transparent;")
-        layout.addWidget(msg_label)
+        self.msg_label = QtWidgets.QLabel(text)
+        self.msg_label.setWordWrap(True)
+        self.msg_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self.msg_label.setStyleSheet("color: #eeeeee; font-size: 12px; background: transparent;")
+        layout.addWidget(self.msg_label)
+
+    def set_text(self, text):
+        """Update the displayed message text (used for streaming)."""
+        self.msg_label.setText(text)
 
 
 # ---------------------------------------------------------------------------
@@ -699,16 +703,20 @@ class GeminiChatPanel(QtWidgets.QWidget):
         self._send_btn.setText("Sending...")
         self._status_label.setText("Waiting for Gemini response...")
 
+        # Create an empty assistant bubble for streaming
+        self._streaming_bubble = self._add_bubble("model", "▌")
+        self._streaming_text = ""
+
         # Run API call in background thread
         session_data = json.loads(json.dumps(self._current_session))  # deep copy
         threading.Thread(
-            target=self._call_gemini_thread,
+            target=self._call_gemini_stream_thread,
             args=(session_data,),
             daemon=True,
         ).start()
 
-    def _call_gemini_thread(self, session_data):
-        """Runs in background thread — calls Gemini API."""
+    def _call_gemini_stream_thread(self, session_data):
+        """Runs in background thread — calls Gemini API with streaming."""
         try:
             from google import genai
             from google.genai import types
@@ -717,7 +725,7 @@ class GeminiChatPanel(QtWidgets.QWidget):
             settings = NanoBananaSettings()
             api_key = settings.api_key
             if not api_key:
-                self._post_response("Error: No API key configured. Please set it in Settings.", error=True)
+                self._stream_finish("Error: No API key configured. Please set it in Settings.", error=True)
                 return
 
             client = genai.Client(api_key=api_key)
@@ -755,39 +763,64 @@ class GeminiChatPanel(QtWidgets.QWidget):
                     role = "user" if msg["role"] == "user" else "model"
                     contents.append(types.Content(role=role, parts=parts))
 
-            # Call API
-            response = client.models.generate_content(
+            # Stream API call
+            full_text = ""
+            for chunk in client.models.generate_content_stream(
                 model=model,
                 contents=contents,
-            )
+            ):
+                if chunk.text:
+                    full_text += chunk.text
+                    self._stream_update_chunk(full_text)
 
-            reply_text = response.text if response.text else "(No response)"
-            self._post_response(reply_text)
+            if not full_text:
+                full_text = "(No response)"
+
+            self._stream_finish(full_text)
 
         except Exception as e:
             tb = traceback.format_exc()
             print("[GeminiChat] Error: {}".format(tb))
-            self._post_response("Error: {}".format(str(e)), error=True)
+            self._stream_finish("Error: {}".format(str(e)), error=True)
 
-    def _post_response(self, text, error=False):
-        """Thread-safe: schedule UI update on main thread."""
-        # Use nuke.executeInMainThreadWithResult for thread safety
+    def _stream_update_chunk(self, accumulated_text):
+        """Thread-safe: update the streaming bubble with accumulated text so far."""
         def _update():
             if not _isValid(self):
                 return
-            # Add assistant message
+            if hasattr(self, "_streaming_bubble") and self._streaming_bubble and _isValid(self._streaming_bubble):
+                self._streaming_bubble.set_text(accumulated_text + " ▌")
+                self._scroll_to_bottom()
+        try:
+            nuke.executeInMainThreadWithResult(_update)
+        except Exception:
+            pass
+
+    def _stream_finish(self, final_text, error=False):
+        """Thread-safe: finalize the streaming bubble and save to session."""
+        def _update():
+            if not _isValid(self):
+                return
+
+            # Update the bubble with final text (remove cursor)
+            if hasattr(self, "_streaming_bubble") and self._streaming_bubble and _isValid(self._streaming_bubble):
+                self._streaming_bubble.set_text(final_text)
+
+            # Save assistant message to session
             if self._current_session is not None:
-                assistant_msg = {"role": "model", "text": text, "images": []}
+                assistant_msg = {"role": "model", "text": final_text, "images": []}
                 self._current_session["messages"].append(assistant_msg)
                 self._session_mgr.save_session(self._current_session)
 
-            self._add_bubble("model", text)
+            self._streaming_bubble = None
+            self._streaming_text = ""
             self._is_sending = False
             self._send_btn.setEnabled(True)
             self._send_btn.setText("Send")
             self._status_label.setText(
                 "Error occurred" if error else "Response received"
             )
+            self._scroll_to_bottom()
 
         try:
             nuke.executeInMainThreadWithResult(_update)
