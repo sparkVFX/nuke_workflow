@@ -769,9 +769,13 @@ _SEND_TO_STUDIO_SCRIPT = """
 import nuke, socket, json, struct
 
 node = nuke.thisNode()
-file_path = node["file"].value()
+file_path = ""
+if "nb_file" in node.knobs():
+    file_path = node["nb_file"].value()
+elif "file" in node.knobs():
+    file_path = node["file"].value()
 if not file_path:
-    nuke.message("No file path set on this Read node.")
+    nuke.message("No file path set on this node.")
 else:
     data = json.dumps({
         "action": "add_clips",
