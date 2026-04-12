@@ -837,170 +837,197 @@ def create_nb_player_node(image_path=None, name=None, xpos=None, ypos=None,
     Returns:
         tuple: (group_node, internal_read_node)
     """
-    group = nuke.nodes.Group()
+    # Wrap entire node creation as a single undo unit so that
+    # subsequent rename-undo cannot partially break internal structure
+    nuke.Undo.begin("Create Nano Viewer")
+    try:
+        _default_name = "Nano_Viewer1"
+        group = nuke.nodes.Group(name=(name or _default_name))
 
-    if name:
-        group.setName(name)
-    else:
-        group.setName("NB_Player1")
-    if xpos is not None:
-        group["xpos"].setValue(int(xpos))
-    if ypos is not None:
-        group["ypos"].setValue(int(ypos))
+        if xpos is not None:
+            group["xpos"].setValue(int(xpos))
+        if ypos is not None:
+            group["ypos"].setValue(int(ypos))
 
-    # Green colour (same as VEO Player)
-    group["tile_color"].setValue(0x00C878FF)
-    group["label"].setValue("NB Player")
+        # Green colour (same as VEO Player)
+        group["tile_color"].setValue(0x00C878FF)
+        # No label — keep the node name clean in the DAG
 
-    # --- Build internals: Read → Output ---
-    group.begin()
-    read_node = nuke.nodes.Read(name="InternalRead")
-    out_node = nuke.nodes.Output(name="Output")
-    out_node.setInput(0, read_node)
-    group.end()
-
-    # Load the image file AFTER group.end() so knobs are fully populated
-    if image_path and os.path.exists(image_path):
+        # --- Build internals: Read → Output ---
         group.begin()
-        read_node["file"].fromUserText(image_path)
+        read_node = nuke.nodes.Read(name="InternalRead")
+        out_node = nuke.nodes.Output(name="Output")
+        out_node.setInput(0, read_node)
         group.end()
 
-    # --- Expose Read-tab knobs on the Group panel ---
-    # Tab: Read
-    tab_read = nuke.Tab_Knob("read_tab", "Read")
-    group.addKnob(tab_read)
+        # Load the image file AFTER group.end() so knobs are fully populated
+        if image_path and os.path.exists(image_path):
+            group.begin()
+            read_node["file"].fromUserText(image_path)
+            group.end()
 
-    read_full = read_node.fullName()
+        # --- Expose Read-tab knobs on the Group panel ---
+        # Use REAL knobs (NOT Link_Knob) so they survive rename-undo.
+        # Link_Knob stores hardcoded TCL paths like "NodeName.InternalRead.format"
+        # which break after undo-rename. Real knobs store actual values,
+        # and a knobChanged callback keeps them synced via name lookup.
+        tab_read = nuke.Tab_Knob("read_tab", "Read")
+        group.addKnob(tab_read)
 
-    # --- file knob ---
-    file_knob = nuke.File_Knob("nb_file", "file")
-    if image_path:
-        file_knob.setValue(image_path.replace("\\", "/"))
-    group.addKnob(file_knob)
+        # --- file knob ---
+        file_knob = nuke.File_Knob("nb_file", "file")
+        if image_path:
+            file_knob.setValue(image_path.replace("\\", "/"))
+        group.addKnob(file_knob)
 
-    # --- format ---
-    try:
-        link_format = nuke.Link_Knob("format")
-        link_format.makeLink(read_full, "format")
-        link_format.setLabel("format")
-        group.addKnob(link_format)
-    except Exception:
-        pass
-
-    # --- colorspace (Input Transform), premultiplied, raw, auto_alpha on the same line ---
-    if "colorspace" in read_node.knobs():
+        # --- format (read-only display) ---
         try:
-            link = nuke.Link_Knob("colorspace")
-            link.makeLink(read_full, "colorspace")
-            link.setLabel(read_node["colorspace"].label() or "colorspace")
-            link.setFlag(nuke.STARTLINE)
-            group.addKnob(link)
+            fmt_val = read_node["format"].value()
+            format_knob = nuke.String_Knob("nb_format", "format")
+            format_knob.setEnabled(False)
+            group.addKnob(format_knob)
         except Exception:
             pass
-    for kname in ["premultiplied", "raw", "auto_alpha"]:
-        if kname in read_node.knobs():
-            try:
-                link = nuke.Link_Knob(kname)
-                link.makeLink(read_full, kname)
-                link.setLabel(read_node[kname].label() or kname)
-                link.clearFlag(nuke.STARTLINE)
-                group.addKnob(link)
-            except Exception:
-                pass
 
-    # --- Button to open internal Read node's full properties ---
-    open_read_script = "n = nuke.thisNode()\nn.begin()\nr = nuke.toNode('InternalRead')\nn.end()\nif r: nuke.show(r)"
-    open_btn = nuke.PyScript_Knob("open_read_props", "Open Full Read Properties", open_read_script)
-    open_btn.setFlag(nuke.STARTLINE)
-    group.addKnob(open_btn)
+        # --- colorspace (Input Transform), premultiplied, raw, auto_alpha ---
+        # Use real String/Enumeration knobs, NOT Link_Knob
+        _read_sync_knobs = []  # track which knobs need syncing to internal Read
 
-    # --- knobChanged callback to sync nb_file → internal Read's file ---
-    kc_script = (
-        "n = nuke.thisNode()\n"
-        "k = nuke.thisKnob()\n"
-        "if k.name() == 'nb_file':\n"
-        "    n.begin()\n"
-        "    r = nuke.toNode('InternalRead')\n"
-        "    n.end()\n"
-        "    if r:\n"
-        "        r['file'].fromUserText(k.value())\n"
-    )
-    group["knobChanged"].setValue(kc_script)
+        if "colorspace" in read_node.knobs():
+            cs_label = read_node["colorspace"].label() or "colorspace"
+            cs_knob = nuke.String_Knob("nb_colorspace", cs_label)
+            cs_knob.setValue(read_node["colorspace"].value())
+            cs_knob.setFlag(nuke.STARTLINE)
+            group.addKnob(cs_knob)
+            _read_sync_knobs.append(("nb_colorspace", "colorspace"))
 
-    # --- Divider + Send to Studio button ---
-    studio_divider = nuke.Text_Knob("studio_divider", "")
-    group.addKnob(studio_divider)
+        for kname in ["premultiplied", "raw", "auto_alpha"]:
+            if kname in read_node.knobs():
+                klabel = read_node[kname].label() or kname
+                real_knob = nuke.Boolean_Knob("nb_" + kname, klabel)
+                real_knob.setValue(int(read_node[kname].value()))
+                real_knob.clearFlag(nuke.STARTLINE)
+                group.addKnob(real_knob)
+                _read_sync_knobs.append(("nb_" + kname, kname))
 
-    studio_btn = nuke.PyScript_Knob("send_to_studio", "Send To Sequence", _SEND_TO_STUDIO_SCRIPT)
-    studio_btn.setFlag(nuke.STARTLINE)
-    group.addKnob(studio_btn)
+        # --- Button to open internal Read node's full properties ---
+        open_read_script = (
+            "n = nuke.thisNode()\n"
+            "n.begin()\n"
+            "r = nuke.toNode('InternalRead')\n"
+            "n.end()\n"
+            "if r:\n"
+            "    nuke.show(r)\n"
+        )
+        open_btn = nuke.PyScript_Knob(
+            "open_read_props", "Open Full Read Properties", open_read_script
+        )
+        open_btn.setFlag(nuke.STARTLINE)
+        group.addKnob(open_btn)
 
-    # ============================================================
-    # Generation parameters + Regenerate Tab (replaces old Prompt node)
-    # ============================================================
-    tab_gen = nuke.Tab_Knob("gen_tab", "Regenerate")
-    group.addKnob(tab_gen)
+        # --- knobChanged callback: sync ALL exposed knobs → internal Read ---
+        # Uses name-based lookup (nuke.toNode) so it survives rename/undo.
+        _sync_pairs_str = repr(_read_sync_knobs).replace("'", '"')
+        kc_script = (
+            "import nuke\n"
+            "n = nuke.thisNode()\n"
+            "k = nuke.thisKnob()\n"
+            "kn = k.name()\n"
+            "n.begin()\n"
+            "r = nuke.toNode('InternalRead')\n"
+            "n.end()\n"
+            "if not r:\n"
+            "    return\n"
+            "# Sync file\n"
+            "if kn == 'nb_file':\n"
+            "    r['file'].fromUserText(k.value())\n"
+            "# Sync other read knobs\n"
+            "_pairs = " + _sync_pairs_str + "\n"
+            "for _gk, _rk in _pairs:\n"
+            "    if kn == _gk and _rk in r.knobs():\n"
+            "        if isinstance(r[_rk].value(), int):\n"
+            "            r[_rk].setValue(int(k.value()))\n"
+            "        else:\n"
+            "            r[_rk].setValue(k.value())\n"
+        )
+        group["knobChanged"].setValue(kc_script)
 
-    # Store generation settings as hidden knobs (read by PyCustom widget)
-    model_knob = nuke.String_Knob("nb_model", "Model")
-    model_knob.setValue(model or "")
-    model_knob.setFlag(nuke.INVISIBLE)
-    group.addKnob(model_knob)
+        # --- Divider + Send to Studio button ---
+        studio_divider = nuke.Text_Knob("studio_divider", "")
+        group.addKnob(studio_divider)
 
-    ratio_knob = nuke.String_Knob("nb_ratio", "Ratio")
-    ratio_knob.setValue(ratio or "")
-    ratio_knob.setFlag(nuke.INVISIBLE)
-    group.addKnob(ratio_knob)
+        studio_btn = nuke.PyScript_Knob("send_to_studio", "Send To Sequence", _SEND_TO_STUDIO_SCRIPT)
+        studio_btn.setFlag(nuke.STARTLINE)
+        group.addKnob(studio_btn)
 
-    res_knob = nuke.String_Knob("nb_resolution", "Resolution")
-    res_knob.setValue(resolution or "")
-    res_knob.setFlag(nuke.INVISIBLE)
-    group.addKnob(res_knob)
+        # ============================================================
+        # Generation parameters + Regenerate Tab (replaces old Prompt node)
+        # ============================================================
+        tab_gen = nuke.Tab_Knob("gen_tab", "Regenerate")
+        group.addKnob(tab_gen)
 
-    seed_val = int(seed) if seed else 0
-    seed_clamped = min(seed_val, 2147483647)
-    seed_knob = nuke.Int_Knob("nb_seed", "Seed")
-    seed_knob.setValue(seed_clamped)
-    seed_knob.setFlag(nuke.INVISIBLE)
-    group.addKnob(seed_knob)
+        # Store generation settings as hidden knobs (read by PyCustom widget)
+        model_knob = nuke.String_Knob("nb_model", "Model")
+        model_knob.setValue(model or "")
+        model_knob.setFlag(nuke.INVISIBLE)
+        group.addKnob(model_knob)
 
-    prompt_knob = nuke.Multiline_Eval_String_Knob("nb_prompt", "Prompt")
-    prompt_knob.setValue(prompt)
-    prompt_knob.setFlag(nuke.INVISIBLE)
-    group.addKnob(prompt_knob)
+        ratio_knob = nuke.String_Knob("nb_ratio", "Ratio")
+        ratio_knob.setValue(ratio or "")
+        ratio_knob.setFlag(nuke.INVISIBLE)
+        group.addKnob(ratio_knob)
 
-    neg_knob = nuke.Multiline_Eval_String_Knob("nb_neg_prompt", "Negative Prompt")
-    neg_knob.setValue(neg_prompt)
-    neg_knob.setFlag(nuke.INVISIBLE)
-    group.addKnob(neg_knob)
+        res_knob = nuke.String_Knob("nb_resolution", "Resolution")
+        res_knob.setValue(resolution or "")
+        res_knob.setFlag(nuke.INVISIBLE)
+        group.addKnob(res_knob)
 
-    output_path_knob = nuke.File_Knob("nb_output_path", "Output Path")
-    output_path_knob.setValue((image_path or "").replace("\\", "/"))
-    output_path_knob.setFlag(nuke.INVISIBLE)
-    group.addKnob(output_path_knob)
+        seed_val = int(seed) if seed else 0
+        seed_clamped = min(seed_val, 2147483647)
+        seed_knob = nuke.Int_Knob("nb_seed", "Seed")
+        seed_knob.setValue(seed_clamped)
+        seed_knob.setFlag(nuke.INVISIBLE)
+        group.addKnob(seed_knob)
 
-    # PyCustom_Knob for the regenerate UI widget
-    regen_custom = nuke.PyCustom_Knob(
-        "nanobanana_regen_ui",
-        "",
-        "ai_workflow.nanobanana.NanoBananaPlayerRegenWidget()"
-    )
-    regen_custom.setFlag(nuke.STARTLINE)
-    group.addKnob(regen_custom)
+        prompt_knob = nuke.Multiline_Eval_String_Knob("nb_prompt", "Prompt")
+        prompt_knob.setValue(prompt)
+        prompt_knob.setFlag(nuke.INVISIBLE)
+        group.addKnob(prompt_knob)
 
-    # --- Hidden marker knob ---
-    marker = nuke.Boolean_Knob("is_nb_player", "")
-    marker.setValue(True)
-    marker.setFlag(nuke.INVISIBLE)
-    group.addKnob(marker)
+        neg_knob = nuke.Multiline_Eval_String_Knob("nb_neg_prompt", "Negative Prompt")
+        neg_knob.setValue(neg_prompt)
+        neg_knob.setFlag(nuke.INVISIBLE)
+        group.addKnob(neg_knob)
 
-    # Set colorspace to sRGB for generated images
-    try:
-        read_node["colorspace"].setValue("sRGB")
-    except Exception:
-        pass
+        output_path_knob = nuke.File_Knob("nb_output_path", "Output Path")
+        output_path_knob.setValue((image_path or "").replace("\\", "/"))
+        output_path_knob.setFlag(nuke.INVISIBLE)
+        group.addKnob(output_path_knob)
 
-    return group, read_node
+        # PyCustom_Knob for the regenerate UI widget
+        regen_custom = nuke.PyCustom_Knob(
+            "nanobanana_regen_ui",
+            "",
+            "ai_workflow.nanobanana.NanoBananaPlayerRegenWidget()"
+        )
+        regen_custom.setFlag(nuke.STARTLINE)
+        group.addKnob(regen_custom)
+
+        # --- Hidden marker knob ---
+        marker = nuke.Boolean_Knob("is_nb_player", "")
+        marker.setValue(True)
+        marker.setFlag(nuke.INVISIBLE)
+        group.addKnob(marker)
+
+        # Set colorspace to sRGB for generated images
+        try:
+            read_node["colorspace"].setValue("sRGB")
+        except Exception:
+            pass
+
+        return group, read_node
+    finally:
+        nuke.Undo.end()
 
 
 # ---------------------------------------------------------------------------
@@ -1759,7 +1786,7 @@ class NanoBananaWidget(QtWidgets.QWidget):
                             px = gen_x + 300
                             py = gen_y + 50
 
-                        player_name = "NB_Result{}".format(player_num)
+                        player_name = "Nano_Viewer{}".format(player_num)
                         player_node, read_node = create_nb_player_node(
                             image_path=path,
                             name=player_name,
@@ -2602,8 +2629,7 @@ def create_nanobanana_node():
     # Always start with 1 input; if node selected, connect it to img1 after creation
     initial_inputs = 1
 
-    group_node = nuke.nodes.Group()
-    group_node.setName("NanoBanana_Generate")
+    group_node = nuke.nodes.Group(name="NanoBanana_Generate")
     group_node["tile_color"].setValue(0x3CB371FF)  # Green
 
     # Position below selected node, or at DAG viewport center

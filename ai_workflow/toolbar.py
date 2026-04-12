@@ -125,6 +125,25 @@ def create_veo_player():
     return player
 
 
+def create_nano_viewer():
+    """Manually create a Nano Viewer (image viewer) Group node."""
+    import ai_workflow.nanobanana as nb
+    # Position at DAG center or below selected node
+    sel = nuke.selectedNodes()
+    sel_node = sel[0] if sel else None
+    if sel_node:
+        xpos = int(sel_node["xpos"].value())
+        ypos = int(sel_node["ypos"].value()) + 100
+    else:
+        try:
+            center = nuke.center()
+            xpos, ypos = int(center[0]), int(center[1])
+        except Exception:
+            xpos, ypos = 0, 0
+    player, read = nb.create_nb_player_node(xpos=xpos, ypos=ypos)
+    return player
+
+
 def register_toolbar():
     """Register the AI Workflow toolbar in Nuke's left sidebar."""
 
@@ -141,6 +160,11 @@ def register_toolbar():
     ai_menu.addCommand(
         "Generate Image NanoBanana",
         "ai_workflow.toolbar.create_node_generate_image_nanobanana()",
+        icon="Banana.png",
+    )
+    ai_menu.addCommand(
+        "Nano Viewer",
+        "ai_workflow.toolbar.create_nano_viewer()",
         icon="Banana.png",
     )
     ai_menu.addCommand(
