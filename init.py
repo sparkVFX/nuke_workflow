@@ -135,6 +135,15 @@ else:
 
     nuke.addOnCreate(_preload_custom_knob_modules, nodeClass="Root")
 
+    # Restore NB Player thumbnails on script load
+    def _restore_thumbnails():
+        try:
+            from ai_workflow.nanobanana import restore_nb_thumbnails
+            restore_nb_thumbnails()
+        except Exception as _e:
+            print("[AI Workflow] Thumbnail restore error: {}".format(_e))
+    nuke.addOnScriptLoad(_restore_thumbnails)
+
     # --- NukeStudio Listener ---
     # studio_listener.py is now deployed to .nuke/Python/Startup/
     # and auto-started by NukeStudio, no manual import needed.

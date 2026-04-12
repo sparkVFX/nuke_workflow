@@ -811,48 +811,58 @@ def _add_send_to_studio_knob(read_node):
         print("Warning: could not add Send to Studio knob: {}".format(e))
 
 
-def _get_internal_read_nb(group_node):
-    """Get the internal Read node from a NanoBanana Player Group."""
-    if group_node is None or group_node.Class() != "Group":
+def _get_internal_read_nb(player_node):
+    """Get the underlying Read node from a NanoBanana Player.
+
+    With the Read-based architecture the player node IS the Read node,
+    so we just return it directly (after a sanity check).
+    For legacy Group-based players we still reach inside the Group.
+    """
+    if player_node is None:
         return None
-    try:
-        group_node.begin()
-        r = nuke.toNode("InternalRead")
-        group_node.end()
-        return r
-    except Exception:
-        return None
+    if player_node.Class() == "Read":
+        return player_node
+    # Legacy Group-based player
+    if player_node.Class() == "Group":
+        try:
+            player_node.begin()
+            r = nuke.toNode("InternalRead")
+            player_node.end()
+            return r
+        except Exception:
+            return None
+    return None
 
 
 def _update_node_thumbnail(node, image_path=None):
-    """Enable the native Nuke postage-stamp preview on the Group node.
+    """Enable the native Nuke postage-stamp preview on the NB Player node.
 
-    This uses the same rendering mechanism as Read nodes — Nuke renders
-    the node's output at the current frame and displays it as a thumbnail
-    directly on the node in the DAG.  No external thumbnail file needed.
+    With the Read-based architecture, the player IS a Read node, so
+    postage_stamp works natively — just set it to True.  For legacy
+    Group players we also try, though it may not display.
 
-    If *image_path* is provided (and valid), we also make sure the internal
-    Read node has that file loaded so there is something to render.
-    After enabling postage_stamp, we force a redraw so the thumbnail
-    updates immediately (like Read nodes do).
+    If *image_path* is provided (and valid), we make sure the Read's
+    ``file`` knob is loaded with it.
     """
     if not node:
         return
     _tag = "[NB] Thumbnail '{}'".format(node.name())
 
-    # If image_path supplied, ensure InternalRead is loaded with it
+    # If image_path supplied, load it into the Read (or internal Read for legacy)
     if image_path and os.path.isfile(image_path):
         try:
-            internal_read = _get_internal_read_nb(node)
-            if internal_read:
-                node.begin()
-                internal_read["file"].fromUserText(image_path)
-                node.end()
-                print("{}: InternalRead loaded '{}'".format(_tag, image_path))
+            read_node = _get_internal_read_nb(node)
+            if read_node:
+                if node.Class() == "Group":
+                    node.begin()
+                read_node["file"].fromUserText(image_path)
+                if node.Class() == "Group":
+                    node.end()
+                print("{}: Read loaded '{}'".format(_tag, image_path))
         except Exception as e:
-            print("{}: InternalRead load error: {}".format(_tag, e))
+            print("{}: Read load error: {}".format(_tag, e))
 
-    # Enable postage_stamp knob — same approach as Read nodes
+    # Enable postage_stamp — works natively on Read nodes
     if "postage_stamp" in node.knobs():
         try:
             node["postage_stamp"].setValue(True)
@@ -861,17 +871,6 @@ def _update_node_thumbnail(node, image_path=None):
             print("{}: postage_stamp failed: {}".format(_tag, e))
     else:
         print("{}: no postage_stamp knob (Class={})".format(_tag, node.Class()))
-        return
-
-    # Force Nuke to actually compute the Group output pixels.
-    # node.sample() requests a pixel value, forcing the entire internal
-    # pipeline (InternalRead → Output) to be computed. This is the most
-    # reliable way to populate data for the postage stamp.
-    try:
-        node.sample("red", 0, 0)
-        print("{}: forced pixel computation via sample()".format(_tag))
-    except Exception as e:
-        print("{}: sample() failed: {}".format(_tag, e))
 
 
 def restore_nb_thumbnails():
@@ -879,9 +878,12 @@ def restore_nb_thumbnails():
 
     Called on script load so that existing NB Player nodes display their
     thumbnail in the Node Graph (like Read nodes).
+    Searches both Read nodes (new architecture) and Group nodes (legacy).
     """
     restored = 0
-    for node in nuke.allNodes("Group"):
+    for node in nuke.allNodes():
+        if node.Class() not in ("Read", "Group"):
+            continue
         if "is_nb_player" in node.knobs() and node["is_nb_player"].value():
             _update_node_thumbnail(node)
             restored += 1
@@ -894,300 +896,79 @@ def create_nb_player_node(image_path=None, name=None, xpos=None, ypos=None,
                          ratio="auto", resolution="1K", seed=0,
                          input_images=None):
     """
-    Create a NanoBanana Player Group node wrapping a Read node.
-    Similar to VEO Player but for single images (no frame range knobs).
-    
-    Now includes generation parameters and regeneration capability,
-    replacing the old Prompt node pattern.
+    Create a NanoBanana Player node using a direct Read node.
+
+    Unlike the previous Group-based approach, this creates a plain Read
+    node and adds custom user knobs to it.  The Read node natively
+    supports postage_stamp thumbnails — no hacks required.
+
+    For backward-compatible DAG connections (the old ``setInput(0, ...)``
+    pattern cannot work on Read nodes), we store a ``nb_parent_node``
+    string knob that records the parent Generator/Prompt node name.
 
     Returns:
-        tuple: (group_node, internal_read_node)
+        tuple: (read_node, read_node)  — both elements are the same Read
+               node, for API compatibility with callers that expect
+               (group, internal_read).
     """
-    # Wrap entire node creation as a single undo unit so that
-    # subsequent rename-undo cannot partially break internal structure
     nuke.Undo.begin("Create Nano Viewer")
     try:
         _default_name = "Nano_Viewer1"
-        group = nuke.nodes.Group(name=(name or _default_name))
+        read_node = nuke.nodes.Read(name=(name or _default_name))
 
         if xpos is not None:
-            group["xpos"].setValue(int(xpos))
+            read_node["xpos"].setValue(int(xpos))
         if ypos is not None:
-            group["ypos"].setValue(int(ypos))
+            read_node["ypos"].setValue(int(ypos))
 
         # Green colour (same as VEO Player)
-        group["tile_color"].setValue(0x00C878FF)
-        # No label — keep the node name clean in the DAG
+        read_node["tile_color"].setValue(0x00C878FF)
 
-        # --- Build internals: Read → Output ---
-        group.begin()
-        read_node = nuke.nodes.Read(name="InternalRead")
-        out_node = nuke.nodes.Output(name="Output")
-        out_node.setInput(0, read_node)
-        group.end()
-
-        # Load the image file AFTER group.end() so knobs are fully populated
+        # Load the image file
         if image_path and os.path.exists(image_path):
-            group.begin()
             read_node["file"].fromUserText(image_path)
-            group.end()
 
-        # --- Expose Read-tab knobs on the Group panel ---
-        # Use REAL knobs (NOT Link_Knob) so they survive rename-undo.
-        # Link_Knob stores hardcoded TCL paths like "NodeName.InternalRead.format"
-        # which break after undo-rename. Real knobs store actual values,
-        # and a knobChanged callback keeps them synced via name lookup.
-        tab_read = nuke.Tab_Knob("read_tab", "Read")
-        group.addKnob(tab_read)
-
-        # --- file knob ---
-        file_knob = nuke.File_Knob("nb_file", "file")
-        if image_path:
-            file_knob.setValue(image_path.replace("\\", "/"))
-        group.addKnob(file_knob)
-
-        # Track which knobs need syncing between Group panel <-> internal Read
-        _read_sync_knobs = []
-
-        # --- format (dropdown, like native Read) ---
-        # Format_Knob has no enumValues; use nuke.formats() to build dropdown.
-        fmt_values = []
-        try:
-            for _f in nuke.formats():
-                _fn = _f.name()
-                if _fn:
-                    fmt_values.append(_fn)
-        except Exception:
-            pass
-        if not fmt_values:
-            fmt_values = ["---"]
-        fmt_current = "---"
-        try:
-            _fv = read_node["format"].value()
-            print("[NB Player] format.value type={} repr={}".format(type(_fv).__name__, repr(_fv)))
-            if hasattr(_fv, 'width') and _fv.width() > 0:
-                fmt_current = '%dx%d' % (_fv.width(), _fv.height())
-                print("[NB Player] format from width/height: {}".format(fmt_current))
-            elif hasattr(_fv, 'name') and _fv.name():
-                fmt_current = _fv.name()
-                print("[NB Player] format from name: {}".format(fmt_current))
-            else:
-                print("[NB Player] format fallback: str={}".format(str(_fv)))
-        except Exception as e:
-            print("[NB Player] ERR format read: {}".format(e))
-        # Fallback: if format is a preset name (not WxH), try PIL for actual image size
-        _looks_like_preset = (
-            fmt_current != "---"
-            and ('x' not in fmt_current or not fmt_current.split('x')[0].strip().isdigit())
-        )
-        if _looks_like_preset:
-            print("[NB Player] format '{}' looks like preset, trying PIL...".format(fmt_current))
-            _w, _h = 0, 0
-            try:
-                import PIL.Image as _PIL
-                _img = _PIL.open(image_path) if (image_path and os.path.exists(image_path)) else None
-                if _img:
-                    _w, _h = _img.size
-                    _img.close()
-                    print("[NB Player] PIL size: {}x{}".format(_w, _h))
-            except Exception as e:
-                print("[NB Player] ERR PIL: {}".format(e))
-            if _w > 0 and _h > 0:
-                fmt_current = '%dx%d' % (_w, _h)
-                print("[NB Player] format final (PIL): {}".format(fmt_current))
-            else:
-                print("[NB Player] WARN PIL failed, keeping preset '{}'".format(fmt_current))
-        format_knob = nuke.Enumeration_Knob("nb_format", "format", fmt_values)
-        print("[NB Player] setting nb_format='{}'".format(fmt_current))
-        format_knob.setValue(fmt_current)
-        group.addKnob(format_knob)
-        _read_sync_knobs.append(("nb_format", "format"))
-
-        # --- colorspace (Input Transform), premultiplied, raw, auto_alpha ---
-        # Use real knobs, NOT Link_Knob. colorspace uses Enumeration_Knob for dropdown.
-
-        if "colorspace" in read_node.knobs():
-            cs_label = read_node["colorspace"].label() or "colorspace"
-            # Build dropdown from Read node's own colorspace enum values
-            cs_values = []
-            try:
-                _cs_k = read_node["colorspace"]
-                if hasattr(_cs_k, "values") and callable(_cs_k.values):
-                    cs_values = list(_cs_k.values()) or []
-                elif hasattr(_cs_k, "enumerationItems") and callable(_cs_k.enumerationItems):
-                    cs_values = list(_cs_k.enumerationItems()) or []
-            except Exception:
-                pass
-            if not cs_values:
-                cs_values = ["default", "linear", "sRGB", "Gamma1.8", "Gamma2.2",
-                             "Rec709", "ACEScg", "ALEXAV3LogC"]
-            current_cs = str(read_node["colorspace"].value())
-            if current_cs not in cs_values:
-                cs_values.insert(0, current_cs)
-            cs_knob = nuke.Enumeration_Knob("nb_colorspace", cs_label, cs_values)
-            cs_knob.setValue(current_cs)
-            cs_knob.setFlag(nuke.STARTLINE)
-            group.addKnob(cs_knob)
-            _read_sync_knobs.append(("nb_colorspace", "colorspace"))
-
-        for kname in ["premultiplied", "raw", "auto_alpha"]:
-            if kname in read_node.knobs():
-                klabel = read_node[kname].label() or kname
-                real_knob = nuke.Boolean_Knob("nb_" + kname, klabel)
-                real_knob.setValue(int(read_node[kname].value()))
-                real_knob.clearFlag(nuke.STARTLINE)
-                group.addKnob(real_knob)
-                _read_sync_knobs.append(("nb_" + kname, kname))
-
-        # --- Button to open internal Read node's full properties ---
-        open_read_script = (
-            "n = nuke.thisNode()\n"
-            "n.begin()\n"
-            "r = nuke.toNode('InternalRead')\n"
-            "n.end()\n"
-            "if r:\n"
-            "    nuke.show(r)\n"
-        )
-        open_btn = nuke.PyScript_Knob(
-            "open_read_props", "Open Full Read Properties", open_read_script
-        )
-        open_btn.setFlag(nuke.STARTLINE)
-        group.addKnob(open_btn)
-
-        # --- knobChanged callback: sync ALL exposed knobs <-> internal Read ---
-        # Uses name-based lookup (nuke.toNode) so it survives rename-undo.
-        # DEBUG: logs to Nuke Script Editor console
-        _sync_pairs_str = repr(_read_sync_knobs).replace("'", '"')
-        kc_script = (
-            "import nuke\n"
-            "n = nuke.thisNode()\n"
-            "k = nuke.thisKnob()\n"
-            "kn = k.name()\n"
-            "n.begin()\n"
-            "r = nuke.toNode('InternalRead')\n"
-            "n.end()\n"
-            "if not r:\n"
-            "    pass\n"
-            "# NOTE: no 'return' - Nuke runs knobChanged as standalone script, not a function\n"
-            "# File changed: load + pull fresh values from Read\n"
-            "if kn == 'nb_file' and r:\n"
-            "    # IMPORTANT: fromUserText must run inside group context\n"
-            "    n.begin()\n"
-            "    r['file'].fromUserText(k.value())\n"
-            "    n.end()\n"
-            "    import json as _json_mod, os as _os_mod\n"
-            "    try:\n"
-            "        _fv = r['format'].value()\n"
-            "        _fn = ''\n"
-            "        if hasattr(_fv, 'width') and _fv.width() > 0:\n"
-            "            _fn = '%dx%d' % (_fv.width(), _fv.height())\n"
-            "        elif isinstance(_fv, str) and _fv:\n"
-            "            _fn = _fv\n"
-            "        # Fallback: if format looks like a preset name (not WxH), use PIL\n"
-            "        if _fn and ('x' not in _fn or not _fn.split('x')[0].strip().isdigit()):\n"
-            "            try:\n"
-            "                from PIL import Image as _PILImage\n"
-            "                _fp = k.value().strip()\n"
-            "                if _fp and _os_mod.path.isfile(_fp):\n"
-            "                    _pil_img = _PILImage.open(_fp)\n"
-            "                    _w, _h = _pil_img.size\n"
-            "                    _pil_img.close()\n"
-            "                    if _w > 0 and _h > 0:\n"
-            "                        _fn = '%dx%d' % (_w, _h)\n"
-            "            except Exception:\n"
-            "                pass\n"
-            "        if _fn:\n"
-            "            _cur = list(n['nb_format'].values())\n"
-            "            if _fn not in _cur:\n"
-            "                n['nb_format'].setValues(_cur + [_fn])\n"
-            "            n['nb_format'].setValue(_fn)\n"
-            "    except Exception:\n"
-            "        pass\n"
-            "    try:\n"
-            "        _cv = str(r['colorspace'].value())\n"
-            "        n['nb_colorspace'].setValue(_cv)\n"
-            "    except Exception:\n"
-            "        pass\n"
-            "    # Force postage stamp refresh after file change\n"
-            "    if 'postage_stamp' in n.knobs():\n"
-            "        n['postage_stamp'].setValue(True)\n"
-            "    # Force pixel computation so postage stamp has data to render\n"
-            "    try:\n"
-            "        n.sample('red', 0, 0)\n"
-            "    except Exception:\n"
-            "        pass\n"
-            "# Sync Group->Read for all other exposed knobs\n"
-            "_pairs = " + _sync_pairs_str + "\n"
-            "for _gk, _rk in _pairs:\n"
-            "    if kn == _gk and r and _rk in r.knobs():\n"
-            "        try:\n"
-            "            if _rk == 'format':\n"
-            "                n.begin()\n"
-            "                r['format'].setValue(k.value())\n"
-            "                n.end()\n"
-            "            elif isinstance(r[_rk].value(), int):\n"
-            "                n.begin()\n"
-            "                r[_rk].setValue(int(k.value()))\n"
-            "                n.end()\n"
-            "            else:\n"
-            "                n.begin()\n"
-            "                r[_rk].setValue(k.value())\n"
-            "                n.end()\n"
-            "        except Exception:\n"
-            "            pass\n"
-        )
-        group["knobChanged"].setValue(kc_script)
-        # --- Divider + Send to Studio button ---
-        studio_divider = nuke.Text_Knob("studio_divider", "")
-        group.addKnob(studio_divider)
-
-        studio_btn = nuke.PyScript_Knob("send_to_studio", "Send To Sequence", _SEND_TO_STUDIO_SCRIPT)
-        studio_btn.setFlag(nuke.STARTLINE)
-        group.addKnob(studio_btn)
-
-        # ============================================================
-        # Generation parameters + Regenerate Tab (replaces old Prompt node)
-        # ============================================================
+        # --- Add custom knobs on the Read node's User tab ---
         tab_gen = nuke.Tab_Knob("gen_tab", "Regenerate")
-        group.addKnob(tab_gen)
+        read_node.addKnob(tab_gen)
 
         # Store generation settings as hidden knobs (read by PyCustom widget)
         model_knob = nuke.String_Knob("nb_model", "Model")
         model_knob.setValue(model or "")
         model_knob.setFlag(nuke.INVISIBLE)
-        group.addKnob(model_knob)
+        read_node.addKnob(model_knob)
 
         ratio_knob = nuke.String_Knob("nb_ratio", "Ratio")
         ratio_knob.setValue(ratio or "")
         ratio_knob.setFlag(nuke.INVISIBLE)
-        group.addKnob(ratio_knob)
+        read_node.addKnob(ratio_knob)
 
         res_knob = nuke.String_Knob("nb_resolution", "Resolution")
         res_knob.setValue(resolution or "")
         res_knob.setFlag(nuke.INVISIBLE)
-        group.addKnob(res_knob)
+        read_node.addKnob(res_knob)
 
         seed_val = int(seed) if seed else 0
         seed_clamped = min(seed_val, 2147483647)
         seed_knob = nuke.Int_Knob("nb_seed", "Seed")
         seed_knob.setValue(seed_clamped)
         seed_knob.setFlag(nuke.INVISIBLE)
-        group.addKnob(seed_knob)
+        read_node.addKnob(seed_knob)
 
         prompt_knob = nuke.Multiline_Eval_String_Knob("nb_prompt", "Prompt")
         prompt_knob.setValue(prompt)
         prompt_knob.setFlag(nuke.INVISIBLE)
-        group.addKnob(prompt_knob)
+        read_node.addKnob(prompt_knob)
 
         neg_knob = nuke.Multiline_Eval_String_Knob("nb_neg_prompt", "Negative Prompt")
         neg_knob.setValue(neg_prompt)
         neg_knob.setFlag(nuke.INVISIBLE)
-        group.addKnob(neg_knob)
+        read_node.addKnob(neg_knob)
 
         output_path_knob = nuke.File_Knob("nb_output_path", "Output Path")
         output_path_knob.setValue((image_path or "").replace("\\", "/"))
         output_path_knob.setFlag(nuke.INVISIBLE)
-        group.addKnob(output_path_knob)
+        read_node.addKnob(output_path_knob)
 
         # Store input reference images as JSON (for Regenerate panel ImageStrip)
         input_img_paths = []
@@ -1205,7 +986,13 @@ def create_nb_player_node(image_path=None, name=None, xpos=None, ypos=None,
         inputs_json_knob = nuke.String_Knob("nb_input_images", "Input Images")
         inputs_json_knob.setValue(json.dumps(input_img_paths))
         inputs_json_knob.setFlag(nuke.INVISIBLE)
-        group.addKnob(inputs_json_knob)
+        read_node.addKnob(inputs_json_knob)
+
+        # --- Hidden knob to store parent node name (replaces setInput(0, ...)) ---
+        parent_knob = nuke.String_Knob("nb_parent_node", "Parent Node")
+        parent_knob.setValue("")
+        parent_knob.setFlag(nuke.INVISIBLE)
+        read_node.addKnob(parent_knob)
 
         # PyCustom_Knob for the regenerate UI widget
         regen_custom = nuke.PyCustom_Knob(
@@ -1214,13 +1001,21 @@ def create_nb_player_node(image_path=None, name=None, xpos=None, ypos=None,
             "ai_workflow.nanobanana.NanoBananaPlayerRegenWidget()"
         )
         regen_custom.setFlag(nuke.STARTLINE)
-        group.addKnob(regen_custom)
+        read_node.addKnob(regen_custom)
+
+        # --- Divider + Send to Studio button ---
+        studio_divider = nuke.Text_Knob("studio_divider", "")
+        read_node.addKnob(studio_divider)
+
+        studio_btn = nuke.PyScript_Knob("send_to_studio", "Send To Sequence", _SEND_TO_STUDIO_SCRIPT)
+        studio_btn.setFlag(nuke.STARTLINE)
+        read_node.addKnob(studio_btn)
 
         # --- Hidden marker knob ---
         marker = nuke.Boolean_Knob("is_nb_player", "")
         marker.setValue(True)
         marker.setFlag(nuke.INVISIBLE)
-        group.addKnob(marker)
+        read_node.addKnob(marker)
 
         # Set colorspace to sRGB for generated images
         try:
@@ -1228,10 +1023,12 @@ def create_nb_player_node(image_path=None, name=None, xpos=None, ypos=None,
         except Exception:
             pass
 
-        # --- Set thumbnail icon on the Group node (like Read's postage stamp) ---
-        _update_node_thumbnail(group, image_path)
+        # Enable postage stamp — works natively on Read nodes
+        _update_node_thumbnail(read_node, image_path)
 
-        return group, read_node
+        # Return (read_node, read_node) for API compatibility
+        # (callers expect (group_node, internal_read_node))
+        return read_node, read_node
     finally:
         nuke.Undo.end()
 
@@ -1432,8 +1229,9 @@ def create_prompt_node(generator_node, prompt, neg_prompt, model, ratio, resolut
         read_ref_knob.setFlag(nuke.INVISIBLE)
         prompt_node.addKnob(read_ref_knob)
         
-        # Player's input 0 connects to prompt node (Prompt → Player direction)
-        player_node.setInput(0, prompt_node)
+        # Store parent node reference (Read nodes cannot have inputs)
+        if "nb_parent_node" in player_node.knobs():
+            player_node["nb_parent_node"].setValue(prompt_node.name())
         
         print("NanoBanana: Created NB Player '{}' for output: {}".format(player_node.name(), output_image_path))
     else:
@@ -1497,8 +1295,9 @@ def update_prompt_read_node(prompt_node, new_image_path):
     if "nb_output_path" in prompt_node.knobs():
         prompt_node["nb_output_path"].setValue(new_image_path.replace("\\", "/"))
 
-    # Player's input 0 connects to prompt node (Prompt → Player direction)
-    player_node.setInput(0, prompt_node)
+    # Store parent node reference (Read nodes cannot have inputs)
+    if "nb_parent_node" in player_node.knobs():
+        player_node["nb_parent_node"].setValue(prompt_node.name())
 
     print("NanoBanana: Created new NB Player '{}' for regenerated image: {}".format(
         player_node.name(), new_image_path))
@@ -1980,11 +1779,18 @@ class NanoBananaWidget(QtWidgets.QWidget):
 
                         # Find existing players connected to this generator
                         existing_players = []
-                        for n in nuke.allNodes("Group"):
+                        for n in nuke.allNodes():
+                            if n.Class() not in ("Read", "Group"):
+                                continue
                             if "is_nb_player" in n.knobs() and n["is_nb_player"].value():
-                                inp = n.input(0)
-                                if inp and (inp.name() == gen_node.name()):
+                                # New architecture: check nb_parent_node knob
+                                if "nb_parent_node" in n.knobs() and n["nb_parent_node"].value() == gen_node.name():
                                     existing_players.append(n)
+                                # Legacy Group architecture: check input(0)
+                                elif n.Class() == "Group":
+                                    inp = n.input(0)
+                                    if inp and (inp.name() == gen_node.name()):
+                                        existing_players.append(n)
 
                         player_num = len(existing_players) + 1
                         if existing_players:
@@ -2011,7 +1817,9 @@ class NanoBananaWidget(QtWidgets.QWidget):
                             seed=params["seed"],
                             input_images=_gen_imgs
                         )
-                        player_node.setInput(0, gen_node)
+                        # Store parent node reference (Read nodes cannot have inputs)
+                        if "nb_parent_node" in player_node.knobs():
+                            player_node["nb_parent_node"].setValue(gen_node.name())
 
                         print("NanoBanana: Created NB Player '{}' with regeneration UI".format(player_name))
                         if read_node:
@@ -3494,7 +3302,8 @@ class _NanoBananaPlayerRegenPanel(QtWidgets.QWidget):
                         internal_read = _get_internal_read_nb(node_ref)
                         if internal_read:
                             internal_read["file"].fromUserText(path)
-                            node_ref["nb_file"].setValue(path.replace("\\", "/"))
+                            if "nb_file" in node_ref.knobs():
+                                node_ref["nb_file"].setValue(path.replace("\\", "/"))
                             node_ref["nb_output_path"].setValue(path.replace("\\", "/"))
                             new_seed = metadata.get("seed", s)
                             widget_ref.info_labels["seed"].setText(str(new_seed))
