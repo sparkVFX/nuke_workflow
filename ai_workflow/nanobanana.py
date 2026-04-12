@@ -2372,6 +2372,9 @@ class NanoBananaPromptWidget(QtWidgets.QWidget):
 
         # === Image Reference Strip ===
         from ai_workflow.gemini_chat import ImageStrip, _ThumbCard
+        self._ref_image_strip = ImageStrip(add_callback=self._add_ref_image)
+        # Connect imagesChanged so any strip modification saves to node knob
+        self._ref_image_strip.imagesChanged.connect(self._save_ref_images_to_node)
         main.addWidget(self._ref_image_strip)
 
         # === Regenerate Button ===
@@ -2480,27 +2483,41 @@ def _find_generator_for_player(player_node):
 def _collect_input_image_paths(node):
     """Main entry point: collect images for this generation round.
 
-    Finds the generator node name, then scans input cache dir for
-    exactly those files. Falls back to JSON knob if no match found.
+    Priority 1 (primary): Read nb_input_images JSON knob.
+      - Contains user's last-saved image list (including manual edits).
+      - Reliable on file re-open because Nuke serializes knob values.
+
+    Priority 2 (fallback): Scan input cache dir via generator name.
+      - Used when JSON knob is empty/missing (legacy nodes).
+      - Matches {GenName}_input_img{K}_frame{K}.png pattern.
     """
-    # Step 1: find generator → get its cached input images
+    # Step 1: PRIMARY — try JSON knob first (user-edited image list)
+    if node and "nb_input_images" in node.knobs():
+        try:
+            raw = node["nb_input_images"].value()
+            print("[NB InputScan] Step 1: knob exists, raw length={} chars".format(len(raw) if raw else 0))
+            if raw and raw.strip():
+                paths = [p for p in json.loads(raw) if p]
+                if paths:
+                    found_count = sum(1 for p in paths if os.path.exists(p))
+                    print("[NB InputScan] Primary (JSON): {} image(s), {} on disk".format(
+                        len(paths), found_count))
+                    return paths
+                else:
+                    print("[NB InputScan] Step 1: JSON parsed but empty list")
+            else:
+                print("[NB InputScan] Step 1: knob value is blank/empty")
+        except Exception as e:
+            print("[NB InputScan] JSON knob parse error: {}".format(e))
+    else:
+        print("[NB InputScan] Step 1: knob not found on node")
+
+    # Step 2: FALLBACK — scan input cache directory by generator name
     gen_name = _find_generator_for_player(node)
     if gen_name:
         paths = _collect_input_images_for_round(gen_name)
         if paths:
             return paths
-
-    # Step 2: fallback — try JSON knob (for manually added / legacy data)
-    if node and "nb_input_images" in node.knobs():
-        try:
-            raw = node["nb_input_images"].value()
-            if raw and raw.strip():
-                fallback = [p for p in json.loads(raw) if p]
-                if fallback:
-                    print("[NB InputScan] Fallback: loaded {} images from JSON knob".format(len(fallback)))
-                    return fallback
-        except Exception:
-            pass
 
     print("[NB InputScan] No images found for '{}'".format(node.name() if node else "?"))
     return []
@@ -3410,6 +3427,8 @@ class _NanoBananaPlayerRegenPanel(QtWidgets.QWidget):
         # Image Reference Strip
         from ai_workflow.gemini_chat import ImageStrip, _ThumbCard
         self._ref_image_strip = ImageStrip(add_callback=self._add_ref_image)
+        # Connect imagesChanged so any strip modification saves to node knob
+        self._ref_image_strip.imagesChanged.connect(self._save_ref_images_to_node)
         main.addWidget(self._ref_image_strip)
 
         # REGENERATE BUTTON
@@ -3490,6 +3509,13 @@ class _NanoBananaPlayerRegenPanel(QtWidgets.QWidget):
             self.neg_edit.setPlainText(node["nb_neg_prompt"].value() or "")
         # Load cached reference images from upstream DAG connections instead
         # of JSON-serialized knobs.  This is 100% reliable.
+        # Show raw knob value for debugging
+        raw_knob = ""
+        if "nb_input_images" in node.knobs():
+            try: raw_knob = node["nb_input_images"].value()
+            except: pass
+        print("[NB Player2]   Raw nb_input_images knob value ({} chars): '{}'".format(
+            len(raw_knob), raw_knob[:200] if raw_knob else ""))
         try:
             print("[NB Player2] >>> Scanning upstream for input images from '{}'...".format(
                 node.name() if node else "None"))
@@ -3526,8 +3552,20 @@ class _NanoBananaPlayerRegenPanel(QtWidgets.QWidget):
             print("[NB Player2]     SKIPPED - no node or no knob")
             return
         paths = self._ref_image_strip.images
-        self.node["nb_input_images"].setValue(json.dumps(paths))
-        print("[NB Player2]     SAVED {} paths to knob".format(len(paths)))
+        json_val = json.dumps(paths)
+        self.node["nb_input_images"].setValue(json_val)
+        # Verify write-back
+        verify = ""
+        try: verify = self.node["nb_input_images"].value()
+        except: pass
+        print("[NB Player2]     SAVED {} paths ({} chars), verified={} chars".format(
+            len(paths), len(json_val), len(verify)))
+
+    def _remove_ref_image_callback(self, path):
+        """Called when a thumbnail's remove button is clicked."""
+        if hasattr(self._ref_image_strip, 'remove_image'):
+            self._ref_image_strip.remove_image(path)
+        self._save_ref_images_to_node()
 
     def _save_state_to_node(self):
         """Save current editable values back to the node's hidden knobs."""
@@ -3583,6 +3621,7 @@ class _NanoBananaPlayerRegenPanel(QtWidgets.QWidget):
 
     def _on_regenerate(self):
         """Handle regenerate button click - read params from Player node and re-generate."""
+        print("[NB Player2] ===== _on_regenerate START =====")
         if not self.node:
             nuke.message("No associated node.")
             return
@@ -3591,7 +3630,24 @@ class _NanoBananaPlayerRegenPanel(QtWidgets.QWidget):
             nuke.message("API key not set.\nPlease open CompMind > Setting in the toolbar.")
             return
 
+        # Log current state BEFORE saving
+        strip_imgs_before = self._ref_image_strip.images if hasattr(self, '_ref_image_strip') else []
+        knob_val_before = ""
+        if "nb_input_images" in self.node.knobs():
+            try: knob_val_before = self.node["nb_input_images"].value()
+            except: pass
+        print("[NB Player2]   Before save: strip has {} images, knob has {} chars".format(
+            len(strip_imgs_before), len(knob_val_before)))
+        for i, p in enumerate(strip_imgs_before): print("     strip[{}]: {}".format(i, p))
+
         self._save_state_to_node()
+
+        # Log state AFTER saving
+        knob_val_after = ""
+        if "nb_input_images" in self.node.knobs():
+            try: knob_val_after = self.node["nb_input_images"].value()
+            except: pass
+        print("[NB Player2]   After save:  knob has {} chars".format(len(knob_val_after)))
 
         model = ""
         ratio = "auto"
@@ -3712,6 +3768,16 @@ class _NanoBananaPlayerRegenPanel(QtWidgets.QWidget):
                             nuke.connectViewer(0, internal_read)
                     except Exception as e:
                         print("[NB Player Regen] ERROR updating: {}".format(e))
+
+                # CRITICAL: re-save image list AFTER all knob modifications.
+                # The setValue/fromUserText calls above trigger Nuke's updateValue()
+                # which may interfere with nb_input_images. Re-saving here ensures
+                # the user's current image list (including manual additions/deletions)
+                # persists across save/reload.
+                try:
+                    widget_ref._save_ref_images_to_node()
+                except Exception as e:
+                    print("[NB Player Regen] WARNING: failed to re-save images: {}".format(e))
 
             nuke.executeInMainThread(_update_ui)
             _active_workers.pop(worker_id, None)
