@@ -1300,8 +1300,8 @@ def create_prompt_node(generator_node, prompt, neg_prompt, model, ratio, resolut
     # (for prompts that might have been reconnected)
     for node in nuke.allNodes("Group"):
         if node.name().startswith("Prompt") and "nanobanana_prompt_tab" in node.knobs():
-            if "nb_generator" in node.knobs():
-                if node["nb_generator"].value() == gen_name:
+            if "nb_gen_name" in node.knobs():
+                if node["nb_gen_name"].value() == gen_name:
                     if node not in existing_prompts:
                         existing_prompts.append(node)
     
@@ -1354,12 +1354,14 @@ def create_prompt_node(generator_node, prompt, neg_prompt, model, ratio, resolut
     tab = nuke.Tab_Knob("nanobanana_prompt_tab", "NanoBanana Prompt")
     prompt_node.addKnob(tab)
     
-    # Store which generator this prompt belongs to (hidden - shown in custom widget)
-    gen_knob = nuke.String_Knob("nb_generator", "Generator")
-    gen_knob.setValue(gen_name)
-    gen_knob.setFlag(nuke.INVISIBLE)
-    prompt_node.addKnob(gen_knob)
-    
+    # Store generator node name (for finding cached input images on reload)
+    # Unified name across all node types: nb_gen_name
+    if generator_node:
+        gk = nuke.String_Knob("nb_gen_name", "Generator Name")
+        gk.setFlag(nuke.INVISIBLE)
+        prompt_node.addKnob(gk)
+        gk.setValue(generator_node.name())
+
     # Store generation settings in knobs (all hidden - shown in custom widget)
     model_knob = nuke.String_Knob("nb_model", "Model")
     model_knob.setValue(model)
@@ -2690,10 +2692,10 @@ def _collect_input_image_paths(node):
 
         output_dir = get_output_directory()
 
-        # Find generator name
+        # Find generator name (stored during node creation)
         gen_name = "nanobanana"
-        if "nb_generator" in self.node.knobs():
-            gen_name = self.node["nb_generator"].value() or gen_name
+        if "nb_gen_name" in self.node.knobs():
+            gen_name = self.node["nb_gen_name"].value() or gen_name
 
         worker = NanoBananaWorker(
             model, prompt, neg_prompt, ratio, resolution, seed,
@@ -3621,7 +3623,7 @@ class _NanoBananaPlayerRegenPanel(QtWidgets.QWidget):
             nuke.message("No model set on this player node.")
             return
 
-        output_dir = self.settings.temp_dir
+        output_dir = self.settings.temp_directory
         if not os.path.isdir(output_dir):
             output_dir = os.path.join(os.path.expanduser("~"), ".nuke", "AI_Output")
 
@@ -3633,11 +3635,29 @@ class _NanoBananaPlayerRegenPanel(QtWidgets.QWidget):
         self.status_label.setText("Generating...")
         self._toggle_ui(True)
 
+        # Use stored generator name for consistent file naming
         gen_name = "NB_Regen_{}".format(int(time.time()))
+        if "nb_gen_name" in self.node.knobs():
+            gen_name = self.node["nb_gen_name"].value() or gen_name
+
+        # Collect reference images from strip (same order as displayed)
+        images_info = []
+        if hasattr(self, '_ref_image_strip'):
+            for idx, p in enumerate(self._ref_image_strip.images):
+                if p and os.path.exists(p):
+                    images_info.append({
+                        "index": idx,
+                        "name": "img{}".format(idx + 1),
+                        "path": p,
+                        "connected": True,
+                        "node_name": "user_ref",
+                    })
+
+        print("[NB Player2] _on_regenerate: using {} image(s) for regeneration".format(len(images_info)))
 
         worker = NanoBananaWorker(
             model, prompt_text, neg_text, ratio, resolution, seed,
-            [], output_dir, self.settings.api_key,
+            images_info, output_dir, self.settings.api_key,
             gen_name=gen_name
         )
         self.current_worker = worker
