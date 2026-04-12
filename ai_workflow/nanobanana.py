@@ -892,7 +892,7 @@ def restore_nb_thumbnails():
 def create_nb_player_node(image_path=None, name=None, xpos=None, ypos=None,
                          prompt="", neg_prompt="", model="",
                          ratio="auto", resolution="1K", seed=0,
-                         input_images=None):
+                         input_images=None, gen_name=""):
     """
     Create a NanoBanana Player Group node wrapping a Read node.
     Similar to VEO Player but for single images (no frame range knobs).
@@ -1206,10 +1206,22 @@ def create_nb_player_node(image_path=None, name=None, xpos=None, ypos=None,
         print("[NB Player] nb_input_images: storing {} paths".format(len(input_img_paths)))
         for _ip in input_img_paths:
             print("  [NB Player]   -> {}".format(_ip))
-        inputs_json_knob = nuke.String_Knob("nb_input_images", "Input Images")
-        inputs_json_knob.setValue(json.dumps(input_img_paths))
+        # Use Multiline_Eval_String_Knob instead of String_Knob to avoid
+        # the ~256 char length limit that truncates long JSON arrays of
+        # file paths (especially temp-dir paths on Windows).
+        # CRITICAL: setValue MUST be called AFTER addKnob, otherwise Nuke
+        # resets the value when addKnob is called!
+        inputs_json_knob = nuke.Multiline_Eval_String_Knob("nb_input_images", "Input Images")
         inputs_json_knob.setFlag(nuke.INVISIBLE)
         group.addKnob(inputs_json_knob)
+        inputs_json_knob.setValue(json.dumps(input_img_paths))
+
+        # Store generator node name so we can find cached input images later
+        if gen_name:
+            gen_name_knob = nuke.String_Knob("nb_gen_name", "Generator Name")
+            gen_name_knob.setFlag(nuke.INVISIBLE)
+            group.addKnob(gen_name_knob)
+            gen_name_knob.setValue(gen_name)
 
         # PyCustom_Knob for the regenerate UI widget
         regen_custom = nuke.PyCustom_Knob(
@@ -1400,11 +1412,19 @@ def create_prompt_node(generator_node, prompt, neg_prompt, model, ratio, resolut
     for p in input_paths:
         print("  - {}".format(p))
     
-    inputs_json_knob = nuke.String_Knob("nb_input_images", "Input Images (JSON)")
-    inputs_json_knob.setValue(json.dumps(input_paths))
+    # CRITICAL: setValue MUST be called AFTER addKnob, otherwise Nuke
+    # resets the value when addKnob is called!
+    inputs_json_knob = nuke.Multiline_Eval_String_Knob("nb_input_images", "Input Images (JSON)")
     inputs_json_knob.setFlag(nuke.INVISIBLE)
     prompt_node.addKnob(inputs_json_knob)
-    
+    inputs_json_knob.setValue(json.dumps(input_paths))
+
+    # Store generator node name so we can find cached input images later
+    if generator_node:
+        gen_name_knob = nuke.String_Knob("nb_gen_name", "Generator Name")
+        gen_name_knob.setFlag(nuke.INVISIBLE)
+        prompt_node.addKnob(gen_name_knob)
+        gen_name_knob.setValue(generator_node.name())
     # Add PyCustom_Knob for regenerate UI
     divider = nuke.Text_Knob("divider1", "")
     prompt_node.addKnob(divider)
@@ -2013,7 +2033,8 @@ class NanoBananaWidget(QtWidgets.QWidget):
                             ratio=params["ratio"],
                             resolution=params["resolution"],
                             seed=params["seed"],
-                            input_images=_gen_imgs
+                            input_images=_gen_imgs,
+                            gen_name=gen_node.name()
                         )
                         player_node.setInput(0, gen_node)
 
@@ -2372,6 +2393,119 @@ class NanoBananaPromptWidget(QtWidgets.QWidget):
         self.status_label.setStyleSheet("color: #666; font-size: 11px;")
         main.addWidget(self.status_label)
 
+def _collect_input_images_for_round(gen_name):
+    """Find cached input images for a specific generation round.
+
+    When banana generates, upstream images are rendered to get_input_directory()
+    with filenames:  {GenName}_input_img{K}_frame{K}.png
+    This function finds all files matching this pattern — exactly the images
+    used in THIS round, not other rounds' history.
+
+    Args:
+        gen_name: The NanoBanana_Generate node name (e.g. "NanoBanana_Generate1")
+
+    Returns:
+        List of sorted file path strings.
+    """
+    paths = []
+    try:
+        input_dir = get_input_directory()
+        if not os.path.isdir(input_dir):
+            return paths
+
+        prefix = "{}_input_".format(gen_name)
+        extensions = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+        for fname in sorted(os.listdir(input_dir)):
+            if fname.startswith(prefix):
+                ext = os.path.splitext(fname)[1].lower()
+                if ext in extensions:
+                    fpath = os.path.join(input_dir, fname).replace("\\", "/")
+                    paths.append(fpath)
+
+        print("[NB InputScan] Found {} image(s) for gen='{}' in input dir".format(
+            len(paths), gen_name))
+        for p in paths:
+            exists = os.path.exists(p)
+            print("  [NB InputScan]   -> {} [{}]".format(p, "OK" if exists else "MISSING"))
+
+    except Exception as e:
+        print("[NB InputScan] Error scanning input dir for '{}': {}".format(gen_name, e))
+
+    return paths
+
+
+def _find_generator_for_player(player_node):
+    """Find which NanoBanana_Generate node fed into this Player/Prompt node.
+
+    Walks upstream to find the generator. Also checks nb_gen_name knob
+    (stored during creation) as fast path.
+    """
+    if not player_node:
+        return ""
+
+    # Fast path: check stored generator name
+    if "nb_gen_name" in player_node.knobs():
+        stored = player_node["nb_gen_name"].value() or ""
+        if stored:
+            return stored
+
+    # Slow path: walk upstream looking for NanoBanana_Generate
+    try:
+        visited = set()
+        queue = [player_node]
+        while queue:
+            cur = queue.pop(0)
+            name = cur.name() if hasattr(cur, "name") else "?"
+            if name in visited:
+                continue
+            visited.add(name)
+
+            if hasattr(cur, "name") and isinstance(cur.name(), str) and \
+               cur.name().startswith("NanoBanana_Generate"):
+                return cur.name()
+
+            max_inputs = getattr(cur, "inputs", lambda: 0)()
+            for i in range(max_inputs):
+                inp = cur.input(i)
+                if inp:
+                    queue.append(inp)
+    except Exception as e:
+        print("[NB InputScan] Error walking upstream: {}".format(e))
+
+    return ""
+
+
+def _collect_input_image_paths(node):
+    """Main entry point: collect images for this generation round.
+
+    Finds the generator node name, then scans input cache dir for
+    exactly those files. Falls back to JSON knob if no match found.
+    """
+    # Step 1: find generator → get its cached input images
+    gen_name = _find_generator_for_player(node)
+    if gen_name:
+        paths = _collect_input_images_for_round(gen_name)
+        if paths:
+            return paths
+
+    # Step 2: fallback — try JSON knob (for manually added / legacy data)
+    if node and "nb_input_images" in node.knobs():
+        try:
+            raw = node["nb_input_images"].value()
+            if raw and raw.strip():
+                fallback = [p for p in json.loads(raw) if p]
+                if fallback:
+                    print("[NB InputScan] Fallback: loaded {} images from JSON knob".format(len(fallback)))
+                    return fallback
+        except Exception:
+            pass
+
+    print("[NB InputScan] No images found for '{}'".format(node.name() if node else "?"))
+    return []
+
+
+
+
     def _load_from_node(self):
         """Load settings from node knobs.
         - Populates read-only record section from node knobs.
@@ -2439,39 +2573,29 @@ class NanoBananaPromptWidget(QtWidgets.QWidget):
             self.prompt_edit.setText(prompt)
             self.neg_prompt_edit.setText(neg_prompt)
 
-            # Load cached reference images into strip (keep ALL paths, even if
-            # files are temporarily missing — _ThumbCard shows a placeholder)
+            # Load reference images from nb_input_images JSON knob.
+            # Uses Multiline_Eval_String_Knob — no length limit, stores exactly
+            # which images this generation round used.
             try:
                 print("[NB Regen] >>> Loading input images from knob...")
-                print("[NB Regen]     node='{}' | has nb_input_images={}".format(
-                    self.node.name() if self.node else "None",
-                    "nb_input_images" in self.node.knobs() if self.node else "N/A"))
-                if "nb_input_images" in self.node.knobs():
-                    input_images_json = self.node["nb_input_images"].value()
-                    print("[NB Regen]     raw JSON value: (len={}): '{}'".format(
-                        len(input_images_json) if input_images_json else 0,
-                        input_images_json[:200] if input_images_json else "(empty)"))
-                if input_images_json and input_images_json.strip():
-                    input_paths = json.loads(input_images_json)
-                    all_paths = [p for p in input_paths if p]
-                    found_count = sum(1 for p in all_paths if os.path.exists(p))
-                    print("[NB Regen]     PARSED {} paths ({} found on disk)".format(
-                        len(all_paths), found_count))
-                    for vp in all_paths:
-                        print("  [NB Regen]       -> {} [{}]".format(vp, "OK" if os.path.exists(vp) else "MISSING"))
-                    if all_paths:
-                        self.cached_info_label.setText(
-                            "{} image(s) ({} available)".format(len(all_paths), found_count))
-                        for p in all_paths:
-                            self._ref_image_strip.add_image(p)
-                        print("[NB Regen]     DONE - added {} images to strip".format(len(all_paths)))
-                    else:
-                        self.cached_info_label.setText("Text-only generation")
-                        print("[NB Regen]     SKIP - no valid paths after filter")
+                all_paths = _collect_input_image_paths(self.node)
+                found_count = sum(1 for p in all_paths if os.path.exists(p))
+
+                print("[NB Regen]     TOTAL {} paths ({} found on disk)".format(
+                    len(all_paths), found_count))
+                for vp in all_paths:
+                    print("  [NB Regen]       -> {} [{}]".format(vp, "OK" if os.path.exists(vp) else "MISSING"))
+
+                if all_paths:
+                    self.cached_info_label.setText(
+                        "{} image(s) ({} available)".format(len(all_paths), found_count))
+                    for p in all_paths:
+                        self._ref_image_strip.add_image(p)
+                    print("[NB Regen]     DONE - added {} images to strip".format(len(all_paths)))
                 else:
                     self.cached_info_label.setText("Text-only generation")
                     self._ref_image_strip.clear_images()
-                    print("[NB Regen]     EMPTY - knob value is empty or blank")
+                    print("[NB Regen]     No images stored")
             except Exception as ex:
                 print("[NB Regen]     ERROR loading images: {}".format(ex))
                 import traceback
@@ -3362,29 +3486,23 @@ class _NanoBananaPlayerRegenPanel(QtWidgets.QWidget):
             self.prompt_edit.setPlainText(node["nb_prompt"].value() or "")
         if "nb_neg_prompt" in node.knobs():
             self.neg_edit.setPlainText(node["nb_neg_prompt"].value() or "")
-        # Load cached reference images into strip (keep ALL paths, even if
-        # files are temporarily missing — _ThumbCard shows a placeholder)
+        # Load cached reference images from upstream DAG connections instead
+        # of JSON-serialized knobs.  This is 100% reliable.
         try:
-            print("[NB Player2] >>> Loading input images from node '{}'...".format(
+            print("[NB Player2] >>> Scanning upstream for input images from '{}'...".format(
                 node.name() if node else "None"))
-            if "nb_input_images" in node.knobs():
-                input_json = node["nb_input_images"].value()
-                print("[NB Player2]     raw JSON (len={}): '{}'".format(
-                    len(input_json) if input_json else 0,
-                    input_json[:200] if input_json else "(empty)"))
-                if input_json and input_json.strip():
-                    paths = [x for x in (json.loads(input_json) or []) if x]
-                    found = sum(1 for p in paths if os.path.exists(p))
-                    print("[NB Player2]     PARSED {} paths ({} found on disk)".format(len(paths), found))
-                    for vp in paths:
-                        print("  [NB Player2]       -> {} [{}]".format(vp, "OK" if os.path.exists(vp) else "MISSING"))
-                        self._ref_image_strip.add_image(vp)
-                    print("[NB Player2]     DONE - {} images added to strip".format(len(paths)))
-                else:
-                    self._ref_image_strip.clear_images()
-                    print("[NB Player2]     EMPTY knob value")
+            all_paths = _collect_input_image_paths(node)
+            found = sum(1 for p in all_paths if os.path.exists(p))
+            print("[NB Player2]     TOTAL {} paths ({} found on disk)".format(len(all_paths), found))
+
+            for vp in all_paths:
+                print("  [NB Player2]       -> {} [{}]".format(vp, "OK" if os.path.exists(vp) else "MISSING"))
+                self._ref_image_strip.add_image(vp)
+            if all_paths:
+                print("[NB Player2]     DONE - {} images added to strip".format(len(all_paths)))
             else:
                 self._ref_image_strip.clear_images()
+                print("[NB Player2]     No images stored")
         except Exception:
             self._ref_image_strip.clear_images()
 
