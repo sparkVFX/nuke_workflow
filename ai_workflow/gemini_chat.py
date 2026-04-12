@@ -607,11 +607,14 @@ class _ImageStripWheelGrabber(QtCore.QObject):
 
 class _ThumbCard(QtWidgets.QFrame):
     """Single thumbnail card: image + filename label.
-    A centered '✕' remove button appears only on mouse hover."""
+    A '✕' remove button at top-right corner appears only on mouse hover.
+    Double-click opens the image in system default viewer."""
 
     removeClicked = QtCore.Signal(str)  # emits image path
 
     def __init__(self, img_path, parent=None):
+        print("=" * 60)
+        print("[NB ImageStrip] _ThumbCard.__init__ CALLED with path: '{}'".format(img_path))
         super(_ThumbCard, self).__init__(parent)
         self._img_path = img_path
         self.setFixedSize(64, 64)
@@ -624,27 +627,44 @@ class _ThumbCard(QtWidgets.QFrame):
 
         # -- thumbnail --
         self._thumb = QtWidgets.QLabel()
-        pix = QtGui.QPixmap(img_path)
-        print("[NB ImageStrip] _ThumbCard loading: {} | pixmap null={}".format(img_path, pix.isNull()))
-        if not pix.isNull():
-            pix = pix.scaled(60, 60, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
-            self._thumb.setPixmap(pix)
+        _file_exists = bool(img_path and os.path.isfile(img_path))
+        print("[NB ImageStrip] _ThumbCard: file_exists={}, path='{}'".format(_file_exists, img_path))
+        if _file_exists:
+            pix = QtGui.QPixmap(img_path)
+            print("[NB ImageStrip] _ThumbCard loading: {} | null={}".format(img_path, pix.isNull()))
+            if not pix.isNull():
+                pix = pix.scaled(60, 60, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+                self._thumb.setPixmap(pix)
+                print("[NB ImageStrip] _ThumbCard: OK - pixmap set ({}x{})".format(pix.width(), pix.height()))
+            else:
+                # File exists but cannot be decoded as an image
+                self._thumb.setText("⚠")
+                self._thumb.setStyleSheet(
+                    "color: #f59e0b; font-size: 24px; background: #2a2a2a; border-radius: 4px;")
+                print("[NB ImageStrip] _ThumbCard: WARN - file exists but not a valid image")
+        else:
+            # File is missing — show a broken-link placeholder so the user knows
+            self._thumb.setText("🖼")
+            self._thumb.setStyleSheet(
+                "color: #666; font-size: 20px; background: #2a2a2a; border-radius: 4px;")
+            self._thumb.setToolTip("Image file not found:\n{}".format(img_path))
+            print("[NB ImageStrip] _ThumbCard: MISSING - showing placeholder for '{}'".format(img_path))
         self._thumb.setFixedSize(60, 60)
         self._thumb.setAlignment(QtCore.Qt.AlignCenter)
         layout.addWidget(self._thumb)
 
-        # -- remove button (overlay, centered over thumbnail, hidden by default) --
+        # -- remove button (overlay, TOP-RIGHT corner, hidden by default) --
         self._remove_btn = QtWidgets.QPushButton("✕", self)
-        self._remove_btn.setFixedSize(22, 22)
+        btn_size = 18
+        self._remove_btn.setFixedSize(btn_size, btn_size)
         self._remove_btn.setStyleSheet(
             "QPushButton { background: rgba(239,68,68,200); color: white; border: none; "
-            "border-radius: 11px; font-size: 11px; font-weight: bold; }"
-            "QPushButton:hover { background: rgba(220,38,38,240); }"
+            "border-radius: %dpx; font-size: 10px; font-weight: bold; }"
+            "QPushButton:hover { background: rgba(220,38,38,240); }" % (btn_size // 2)
         )
-        # Center the button over the card
-        btn_x = (64 - 22) // 2
-        btn_y = (64 - 22) // 2
-        self._remove_btn.move(btn_x, btn_y)
+        # Position at top-right corner with small margin
+        margin = 2
+        self._remove_btn.move(64 - btn_size - margin, margin)
         self._remove_btn.hide()
         self._remove_btn.clicked.connect(lambda: self.removeClicked.emit(self._img_path))
 
@@ -655,6 +675,28 @@ class _ThumbCard(QtWidgets.QFrame):
     def leaveEvent(self, event):
         self._remove_btn.hide()
         super(_ThumbCard, self).leaveEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        """Open image with system default viewer on double-click."""
+        import subprocess
+        import sys
+        if self._img_path and os.path.isfile(self._img_path):
+            try:
+                if sys.platform == "win32":
+                    os.startfile(self._img_path)
+                else:
+                    opener = "open" if sys.platform == "darwin" else "xdg-open"
+                    subprocess.Popen([opener, self._img_path])
+            except Exception as e:
+                print("[NB ImageStrip] Failed to open image: {}".format(e))
+        else:
+            # File is missing — show a friendly message
+            QtWidgets.QMessageBox.warning(
+                self, "Image Not Found",
+                "The image file could not be found:\n\n{}\n\n"
+                "It may have been moved or deleted. You can remove this "
+                "thumbnail using the ✕ button.".format(self._img_path))
+        super(_ThumbCard, self).mouseDoubleClickEvent(event)
 
     def wheelEvent(self, event):
         """Forward wheel events to the parent ImageStrip so scrolling
@@ -831,13 +873,16 @@ class ImageStrip(QtWidgets.QWidget):
         return list(self._images)
 
     def add_image(self, path):
-        if path and os.path.isfile(path) and path not in self._images:
+        print("[NB ImageStrip] >>> add_image called: path='{}'".format(path))
+        if path and path not in self._images:
             self._images.append(path)
-            print("[NB ImageStrip] add_image: {} | total={}".format(path, len(self._images)))
+            print("[NB ImageStrip] add_image: ADDED '{}' | exists={} | total={}".format(
+                path, os.path.isfile(path) if path else False, len(self._images)))
             self._rebuild()
             self.imagesChanged.emit()
         else:
-            print("[NB ImageStrip] add_image skipped: path={} exists={}".format(path, os.path.isfile(path) if path else False))
+            reason = "empty/None" if not path else "duplicate"
+            print("[NB ImageStrip] add_image SKIPPED '{}': {}".format(path, reason))
 
     def clear_images(self):
         self._images.clear()
@@ -845,7 +890,10 @@ class ImageStrip(QtWidgets.QWidget):
         self.imagesChanged.emit()
 
     def _rebuild(self):
-        print("[NB ImageStrip] _rebuild: {} images".format(len(self._images)))
+        print("[NB ImageStrip] >>> _rebuild called: {} images in _images list".format(len(self._images)))
+        for i, p in enumerate(self._images):
+            print("[NB ImageStrip]   _images[{}]: '{}' (exists={})".format(
+                i, p, os.path.exists(p) if p else False))
 
         # Clear layout
         while self._layout.count():
@@ -856,6 +904,7 @@ class ImageStrip(QtWidgets.QWidget):
 
         # Add all thumbnail cards (no overflow label needed — scroll handles it)
         for idx, img_path in enumerate(self._images):
+            print("[NB ImageStrip]   Creating card[{}] for '{}'".format(idx, img_path))
             card = _ThumbCard(img_path)
             card.removeClicked.connect(self._remove)
             # Install eventFilter so middle-drag / wheel works even when

@@ -2167,6 +2167,8 @@ class NanoBananaPromptWidget(QtWidgets.QWidget):
     Bottom section: editable parameters (same as NanoBanana_Generate) for regeneration."""
 
     def __init__(self, node, parent=None):
+        print("[NB Regen] >>> NanoBananaPromptWidget.__init__ node='{}'".format(
+            node.name() if node else "None"))
         super(NanoBananaPromptWidget, self).__init__(parent)
         self.node = node
         self.setObjectName("nanoBananaRoot")
@@ -2437,24 +2439,43 @@ class NanoBananaPromptWidget(QtWidgets.QWidget):
             self.prompt_edit.setText(prompt)
             self.neg_prompt_edit.setText(neg_prompt)
 
-            # Load cached reference images into strip
+            # Load cached reference images into strip (keep ALL paths, even if
+            # files are temporarily missing — _ThumbCard shows a placeholder)
             try:
+                print("[NB Regen] >>> Loading input images from knob...")
+                print("[NB Regen]     node='{}' | has nb_input_images={}".format(
+                    self.node.name() if self.node else "None",
+                    "nb_input_images" in self.node.knobs() if self.node else "N/A"))
+                if "nb_input_images" in self.node.knobs():
+                    input_images_json = self.node["nb_input_images"].value()
+                    print("[NB Regen]     raw JSON value: (len={}): '{}'".format(
+                        len(input_images_json) if input_images_json else 0,
+                        input_images_json[:200] if input_images_json else "(empty)"))
                 if input_images_json and input_images_json.strip():
                     input_paths = json.loads(input_images_json)
-                    valid_paths = [p for p in input_paths if p and os.path.exists(p)]
-                    print("[NB Regen] _load_from_node: nb_input_images has {} valid paths".format(len(valid_paths)))
-                    for vp in valid_paths:
-                        print("  [NB Regen]   -> {}".format(vp))
-                    if valid_paths:
-                        self.cached_info_label.setText("{} cached input image(s)".format(len(valid_paths)))
-                        for p in valid_paths:
+                    all_paths = [p for p in input_paths if p]
+                    found_count = sum(1 for p in all_paths if os.path.exists(p))
+                    print("[NB Regen]     PARSED {} paths ({} found on disk)".format(
+                        len(all_paths), found_count))
+                    for vp in all_paths:
+                        print("  [NB Regen]       -> {} [{}]".format(vp, "OK" if os.path.exists(vp) else "MISSING"))
+                    if all_paths:
+                        self.cached_info_label.setText(
+                            "{} image(s) ({} available)".format(len(all_paths), found_count))
+                        for p in all_paths:
                             self._ref_image_strip.add_image(p)
+                        print("[NB Regen]     DONE - added {} images to strip".format(len(all_paths)))
                     else:
                         self.cached_info_label.setText("Text-only generation")
+                        print("[NB Regen]     SKIP - no valid paths after filter")
                 else:
                     self.cached_info_label.setText("Text-only generation")
                     self._ref_image_strip.clear_images()
-            except Exception:
+                    print("[NB Regen]     EMPTY - knob value is empty or blank")
+            except Exception as ex:
+                print("[NB Regen]     ERROR loading images: {}".format(ex))
+                import traceback
+                traceback.print_exc()
                 self._ref_image_strip.clear_images()
 
         except Exception as e:
@@ -3107,6 +3128,7 @@ class NanoBananaPlayerRegenWidget(QtWidgets.QWidget):
         return self
 
     def updateValue(self):
+        print("[NB Player2] >>> updateValue() called by Nuke")
         try:
             if hasattr(self, 'panel'):
                 self.panel._save_state_to_node()
@@ -3118,6 +3140,8 @@ class _NanoBananaPlayerRegenPanel(QtWidgets.QWidget):
     """The actual panel content for Player regeneration UI."""
 
     def __init__(self, node=None, parent=None):
+        print("[NB Player2] >>> _NanoBananaPlayerRegenPanel.__init__ node='{}'".format(
+            node.name() if node else "None"))
         super(_NanoBananaPlayerRegenPanel, self).__init__(parent)
         self.node = node
         self.setObjectName("nbPlayerRegenRoot")
@@ -3338,19 +3362,27 @@ class _NanoBananaPlayerRegenPanel(QtWidgets.QWidget):
             self.prompt_edit.setPlainText(node["nb_prompt"].value() or "")
         if "nb_neg_prompt" in node.knobs():
             self.neg_edit.setPlainText(node["nb_neg_prompt"].value() or "")
-        # Load cached reference images into strip
+        # Load cached reference images into strip (keep ALL paths, even if
+        # files are temporarily missing — _ThumbCard shows a placeholder)
         try:
+            print("[NB Player2] >>> Loading input images from node '{}'...".format(
+                node.name() if node else "None"))
             if "nb_input_images" in node.knobs():
                 input_json = node["nb_input_images"].value()
+                print("[NB Player2]     raw JSON (len={}): '{}'".format(
+                    len(input_json) if input_json else 0,
+                    input_json[:200] if input_json else "(empty)"))
                 if input_json and input_json.strip():
-                    paths = json.loads(input_json)
-                    valid = [x for x in (paths or []) if x and os.path.exists(x)]
-                    print("[NB Player2] _load_from_node: nb_input_images has {} valid".format(len(valid)))
-                    for vp in valid:
-                        print("  [NB Player2]   -> {}".format(vp))
+                    paths = [x for x in (json.loads(input_json) or []) if x]
+                    found = sum(1 for p in paths if os.path.exists(p))
+                    print("[NB Player2]     PARSED {} paths ({} found on disk)".format(len(paths), found))
+                    for vp in paths:
+                        print("  [NB Player2]       -> {} [{}]".format(vp, "OK" if os.path.exists(vp) else "MISSING"))
                         self._ref_image_strip.add_image(vp)
+                    print("[NB Player2]     DONE - {} images added to strip".format(len(paths)))
                 else:
                     self._ref_image_strip.clear_images()
+                    print("[NB Player2]     EMPTY knob value")
             else:
                 self._ref_image_strip.clear_images()
         except Exception:
@@ -3366,13 +3398,22 @@ class _NanoBananaPlayerRegenPanel(QtWidgets.QWidget):
             self._save_ref_images_to_node()
 
     def _save_ref_images_to_node(self):
+        print("[NB Player2] >>> _save_ref_images_to_node: strip has {} images".format(
+            len(self._ref_image_strip.images) if hasattr(self, '_ref_image_strip') else 0))
+        for i, p in enumerate(self._ref_image_strip.images):
+            print("  [NB Player2]   images[{}]: '{}'".format(i, p))
         if not self.node or "nb_input_images" not in self.node.knobs():
+            print("[NB Player2]     SKIPPED - no node or no knob")
             return
-        self.node["nb_input_images"].setValue(json.dumps(self._ref_image_strip.images))
+        paths = self._ref_image_strip.images
+        self.node["nb_input_images"].setValue(json.dumps(paths))
+        print("[NB Player2]     SAVED {} paths to knob".format(len(paths)))
 
     def _save_state_to_node(self):
         """Save current editable values back to the node's hidden knobs."""
+        print("[NB Player2] >>> _save_state_to_node called")
         if not self.node:
+            print("[NB Player2]     SKIP - no node")
             return
         try:
             if "nb_model" in self.node.knobs():
@@ -3393,8 +3434,11 @@ class _NanoBananaPlayerRegenPanel(QtWidgets.QWidget):
                 self.node["nb_prompt"].setValue(self.prompt_edit.toPlainText())
             if "nb_neg_prompt" in self.node.knobs():
                 self.node["nb_neg_prompt"].setValue(self.neg_edit.toPlainText())
-            if "nb_input_images" in self.node.knobs():
-                self.node["nb_input_images"].setValue(json.dumps(self._ref_image_strip.images))
+            # NOTE: Do NOT save nb_input_images here!
+            # Images are saved independently via _save_ref_images_to_node()
+            # which is called only on explicit add/remove actions.
+            # Saving here risks overwriting persisted paths with an empty list
+            # if updateValue() fires before _load_from_node() completes.
         except Exception as e:
             print("[NB Player Regen] Error saving state: {}".format(e))
 
