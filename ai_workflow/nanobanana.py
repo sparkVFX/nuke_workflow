@@ -997,6 +997,10 @@ def create_nb_player_node(image_path=None, name=None, xpos=None, ypos=None,
                 print("[NB Player] format final (PIL): {}".format(fmt_current))
             else:
                 print("[NB Player] WARN PIL failed, keeping preset '{}'".format(fmt_current))
+        # Ensure fmt_current is in the dropdown (images may have non-preset sizes like 1024x1024)
+        if fmt_current and fmt_current not in fmt_values:
+            fmt_values.append(fmt_current)
+            print("[NB Player] added '{}' to format dropdown".format(fmt_current))
         format_knob = nuke.Enumeration_Knob("nb_format", "format", fmt_values)
         print("[NB Player] setting nb_format='{}'".format(fmt_current))
         format_knob.setValue(fmt_current)
