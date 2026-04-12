@@ -826,7 +826,8 @@ def _get_internal_read_nb(group_node):
 
 def create_nb_player_node(image_path=None, name=None, xpos=None, ypos=None,
                          prompt="", neg_prompt="", model="",
-                         ratio="auto", resolution="1K", seed=0):
+                         ratio="auto", resolution="1K", seed=0,
+                         input_images=None):
     """
     Create a NanoBanana Player Group node wrapping a Read node.
     Similar to VEO Player but for single images (no frame range knobs).
@@ -898,13 +899,41 @@ def create_nb_player_node(image_path=None, name=None, xpos=None, ypos=None,
         fmt_current = "---"
         try:
             _fv = read_node["format"].value()
+            print("[NB Player] format.value type={} repr={}".format(type(_fv).__name__, repr(_fv)))
             if hasattr(_fv, 'width') and _fv.width() > 0:
                 fmt_current = '%dx%d' % (_fv.width(), _fv.height())
+                print("[NB Player] format from width/height: {}".format(fmt_current))
             elif hasattr(_fv, 'name') and _fv.name():
                 fmt_current = _fv.name()
-        except Exception:
-            pass
+                print("[NB Player] format from name: {}".format(fmt_current))
+            else:
+                print("[NB Player] format fallback: str={}".format(str(_fv)))
+        except Exception as e:
+            print("[NB Player] ERR format read: {}".format(e))
+        # Fallback: if format is a preset name (not WxH), try PIL for actual image size
+        _looks_like_preset = (
+            fmt_current != "---"
+            and ('x' not in fmt_current or not fmt_current.split('x')[0].strip().isdigit())
+        )
+        if _looks_like_preset:
+            print("[NB Player] format '{}' looks like preset, trying PIL...".format(fmt_current))
+            _w, _h = 0, 0
+            try:
+                import PIL.Image as _PIL
+                _img = _PIL.open(image_path) if (image_path and os.path.exists(image_path)) else None
+                if _img:
+                    _w, _h = _img.size
+                    _img.close()
+                    print("[NB Player] PIL size: {}x{}".format(_w, _h))
+            except Exception as e:
+                print("[NB Player] ERR PIL: {}".format(e))
+            if _w > 0 and _h > 0:
+                fmt_current = '%dx%d' % (_w, _h)
+                print("[NB Player] format final (PIL): {}".format(fmt_current))
+            else:
+                print("[NB Player] WARN PIL failed, keeping preset '{}'".format(fmt_current))
         format_knob = nuke.Enumeration_Knob("nb_format", "format", fmt_values)
+        print("[NB Player] setting nb_format='{}'".format(fmt_current))
         format_knob.setValue(fmt_current)
         group.addKnob(format_knob)
         _read_sync_knobs.append(("nb_format", "format"))
@@ -1063,6 +1092,24 @@ def create_nb_player_node(image_path=None, name=None, xpos=None, ypos=None,
         output_path_knob.setValue((image_path or "").replace("\\", "/"))
         output_path_knob.setFlag(nuke.INVISIBLE)
         group.addKnob(output_path_knob)
+
+        # Store input reference images as JSON (for Regenerate panel ImageStrip)
+        input_img_paths = []
+        if input_images:
+            for img in (input_images if isinstance(input_images, list) else []):
+                if isinstance(img, dict):
+                    p = img.get("path", "")
+                else:
+                    p = str(img)
+                if p:
+                    input_img_paths.append(p)
+        print("[NB Player] nb_input_images: storing {} paths".format(len(input_img_paths)))
+        for _ip in input_img_paths:
+            print("  [NB Player]   -> {}".format(_ip))
+        inputs_json_knob = nuke.String_Knob("nb_input_images", "Input Images")
+        inputs_json_knob.setValue(json.dumps(input_img_paths))
+        inputs_json_knob.setFlag(nuke.INVISIBLE)
+        group.addKnob(inputs_json_knob)
 
         # PyCustom_Knob for the regenerate UI widget
         regen_custom = nuke.PyCustom_Knob(
@@ -1271,11 +1318,13 @@ def create_prompt_node(generator_node, prompt, neg_prompt, model, ratio, resolut
     read_node = None
     player_node = None
     if output_image_path and os.path.exists(output_image_path):
+        print("[NB Prompt] create_nb_player_node with {} images_info".format(len(images_info or [])))
         player_node, read_node = create_nb_player_node(
             image_path=output_image_path,
             name="生成图像Prompt{}".format(prompt_num),
             xpos=prompt_x + 200,
             ypos=prompt_y,
+            input_images=images_info,
         )
         
         # Store reference to Player node in Prompt node
@@ -1846,6 +1895,8 @@ class NanoBananaWidget(QtWidgets.QWidget):
                             py = gen_y + 50
 
                         player_name = "Nano_Viewer{}".format(player_num)
+                        _gen_imgs = gen_params.get("images_info", [])
+                        print("[NB Main] create_nb_player_node with {} input_images".format(len(_gen_imgs)))
                         player_node, read_node = create_nb_player_node(
                             image_path=path,
                             name=player_name,
@@ -1856,7 +1907,8 @@ class NanoBananaWidget(QtWidgets.QWidget):
                             model=params["model"],
                             ratio=params["ratio"],
                             resolution=params["resolution"],
-                            seed=params["seed"]
+                            seed=params["seed"],
+                            input_images=_gen_imgs
                         )
                         player_node.setInput(0, gen_node)
 
@@ -2245,19 +2297,6 @@ class NanoBananaPromptWidget(QtWidgets.QWidget):
             if "nb_input_images" in self.node.knobs():
                 input_images_json = self.node["nb_input_images"].value()
 
-            try:
-                if input_images_json and input_images_json.strip():
-                    input_paths = json.loads(input_images_json)
-                    valid_paths = [p for p in input_paths if p and os.path.exists(p)]
-                    if valid_paths:
-                        self.cached_info_label.setText("📷 {} cached input image(s)".format(len(valid_paths)))
-                    else:
-                        self.cached_info_label.setText("Text-only generation")
-                else:
-                    self.cached_info_label.setText("Text-only generation")
-            except:
-                self.cached_info_label.setText("")
-
             # Read node reference
             if "nb_read_node" in self.node.knobs():
                 self.read_node_label.setText(self.node["nb_read_node"].value())
@@ -2298,9 +2337,17 @@ class NanoBananaPromptWidget(QtWidgets.QWidget):
                 if input_images_json and input_images_json.strip():
                     input_paths = json.loads(input_images_json)
                     valid_paths = [p for p in input_paths if p and os.path.exists(p)]
-                    for p in valid_paths:
-                        self._ref_image_strip.add_image(p)
+                    print("[NB Regen] _load_from_node: nb_input_images has {} valid paths".format(len(valid_paths)))
+                    for vp in valid_paths:
+                        print("  [NB Regen]   -> {}".format(vp))
+                    if valid_paths:
+                        self.cached_info_label.setText("{} cached input image(s)".format(len(valid_paths)))
+                        for p in valid_paths:
+                            self._ref_image_strip.add_image(p)
+                    else:
+                        self.cached_info_label.setText("Text-only generation")
                 else:
+                    self.cached_info_label.setText("Text-only generation")
                     self._ref_image_strip.clear_images()
             except Exception:
                 self._ref_image_strip.clear_images()
@@ -3192,8 +3239,11 @@ class _NanoBananaPlayerRegenPanel(QtWidgets.QWidget):
                 input_json = node["nb_input_images"].value()
                 if input_json and input_json.strip():
                     paths = json.loads(input_json)
-                    for p in [x for x in (paths or []) if x and os.path.exists(x)]:
-                        self._ref_image_strip.add_image(p)
+                    valid = [x for x in (paths or []) if x and os.path.exists(x)]
+                    print("[NB Player2] _load_from_node: nb_input_images has {} valid".format(len(valid)))
+                    for vp in valid:
+                        print("  [NB Player2]   -> {}".format(vp))
+                        self._ref_image_strip.add_image(vp)
                 else:
                     self._ref_image_strip.clear_images()
             else:
