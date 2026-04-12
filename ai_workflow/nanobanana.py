@@ -885,18 +885,35 @@ def create_nb_player_node(image_path=None, name=None, xpos=None, ypos=None,
             fmt_val = read_node["format"].value()
             format_knob = nuke.String_Knob("nb_format", "format")
             format_knob.setEnabled(False)
+            format_knob.setValue(fmt_val)
             group.addKnob(format_knob)
         except Exception:
             pass
 
         # --- colorspace (Input Transform), premultiplied, raw, auto_alpha ---
-        # Use real String/Enumeration knobs, NOT Link_Knob
+        # Use real knobs, NOT Link_Knob. colorspace uses Enumeration_Knob for dropdown.
         _read_sync_knobs = []  # track which knobs need syncing to internal Read
 
         if "colorspace" in read_node.knobs():
             cs_label = read_node["colorspace"].label() or "colorspace"
-            cs_knob = nuke.String_Knob("nb_colorspace", cs_label)
-            cs_knob.setValue(read_node["colorspace"].value())
+            # Build dropdown from Read node's own colorspace enum values
+            cs_values = []
+            try:
+                _cs_k = read_node["colorspace"]
+                if hasattr(_cs_k, "values") and callable(_cs_k.values):
+                    cs_values = list(_cs_k.values()) or []
+                elif hasattr(_cs_k, "enumerationItems") and callable(_cs_k.enumerationItems):
+                    cs_values = list(_cs_k.enumerationItems()) or []
+            except Exception:
+                pass
+            if not cs_values:
+                cs_values = ["default", "linear", "sRGB", "Gamma1.8", "Gamma2.2",
+                             "Rec709", "ACEScg", "ALEXAV3LogC"]
+            current_cs = str(read_node["colorspace"].value())
+            if current_cs not in cs_values:
+                cs_values.insert(0, current_cs)
+            cs_knob = nuke.Enumeration_Knob("nb_colorspace", cs_label, cs_values)
+            cs_knob.setValue(current_cs)
             cs_knob.setFlag(nuke.STARTLINE)
             group.addKnob(cs_knob)
             _read_sync_knobs.append(("nb_colorspace", "colorspace"))
@@ -925,33 +942,53 @@ def create_nb_player_node(image_path=None, name=None, xpos=None, ypos=None,
         open_btn.setFlag(nuke.STARTLINE)
         group.addKnob(open_btn)
 
-        # --- knobChanged callback: sync ALL exposed knobs → internal Read ---
-        # Uses name-based lookup (nuke.toNode) so it survives rename/undo.
+        # --- knobChanged callback: sync ALL exposed knobs <-> internal Read ---
+        # Uses name-based lookup (nuke.toNode) so it survives rename-undo.
+        # DEBUG: logs to Nuke Script Editor console
         _sync_pairs_str = repr(_read_sync_knobs).replace("'", '"')
         kc_script = (
             "import nuke\n"
             "n = nuke.thisNode()\n"
             "k = nuke.thisKnob()\n"
             "kn = k.name()\n"
+            "kv = str(k.value()) if k is not None else 'None'\n"
+            "print('[NV] knob=%s val=%s' % (kn, kv))\n"
             "n.begin()\n"
             "r = nuke.toNode('InternalRead')\n"
             "n.end()\n"
             "if not r:\n"
-            "    return\n"
-            "# Sync file\n"
-            "if kn == 'nb_file':\n"
+            "    print('[NV] ERR: InternalRead not found!')\n"
+            "# NOTE: no 'return' - Nuke runs knobChanged as standalone script, not a function\n"
+            "# File changed: load + pull fresh values from Read\n"
+            "if kn == 'nb_file' and r:\n"
             "    r['file'].fromUserText(k.value())\n"
-            "# Sync other read knobs\n"
+            "    try:\n"
+            "        _fv = r['format'].value()\n"
+            "        n['nb_format'].setValue(_fv)\n"
+            "        print('[NV] fmt=' + str(_fv))\n"
+            "    except Exception as ex:\n"
+            "        print('[NV] ERR fmt: ' + str(ex))\n"
+            "    try:\n"
+            "        _cv = str(r['colorspace'].value())\n"
+            "        n['nb_colorspace'].setValue(_cv)\n"
+            "        print('[NV] cs=' + _cv)\n"
+            "    except Exception as ex:\n"
+            "        print('[NV] ERR cs: ' + str(ex))\n"
+            "# Sync Group->Read for all other exposed knobs\n"
             "_pairs = " + _sync_pairs_str + "\n"
             "for _gk, _rk in _pairs:\n"
-            "    if kn == _gk and _rk in r.knobs():\n"
-            "        if isinstance(r[_rk].value(), int):\n"
-            "            r[_rk].setValue(int(k.value()))\n"
-            "        else:\n"
-            "            r[_rk].setValue(k.value())\n"
+            "    if kn == _gk and r and _rk in r.knobs():\n"
+            "        try:\n"
+            "            if isinstance(r[_rk].value(), int):\n"
+                "                r[_rk].setValue(int(k.value()))\n"
+            "            else:\n"
+                "                r[_rk].setValue(k.value())\n"
+            "            print('[NV] synced %s' % _gk)\n"
+            "        except Exception as ex:\n"
+            "            print('[NV] ERR sync %s: ' % _gk + str(ex))\n"
+            "print('[NV] done: ' + kn)\n"
         )
         group["knobChanged"].setValue(kc_script)
-
         # --- Divider + Send to Studio button ---
         studio_divider = nuke.Text_Knob("studio_divider", "")
         group.addKnob(studio_divider)

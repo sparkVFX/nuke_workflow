@@ -19,20 +19,20 @@ Mode input mapping:
 """
 
 try:
-        from PySide6 import QtWidgets, QtCore, QtGui
-        from shiboken6 import isValid as _isValid
-    except ImportError:
-        try:
+    from PySide6 import QtWidgets, QtCore, QtGui
+    from shiboken6 import isValid as _isValid
+except ImportError:
+    try:
         from PySide2 import QtWidgets, QtCore, QtGui
         from shiboken2 import isValid as _isValid
-        except ImportError:
+    except ImportError:
         from PySide import QtGui as QtWidgets
         from PySide import QtCore, QtGui
         def _isValid(obj):
             return True
 
-    import nuke
-    import nukescripts
+import nuke
+import nukescripts
     import os
     import json
     import tempfile
@@ -713,11 +713,26 @@ try:
                 group.addKnob(rk)
                 _sync_pairs.append(("veo_on_error", "on_error"))
 
-            # colorspace
+            # colorspace (dropdown)
             if "colorspace" in read_node.knobs():
                 cs_label = read_node["colorspace"].label() or "colorspace"
-                cs_knob = nuke.String_Knob("veo_colorspace", cs_label)
-                cs_knob.setValue(read_node["colorspace"].value())
+                cs_values = []
+                try:
+                    _cs_k = read_node["colorspace"]
+                    if hasattr(_cs_k, "values") and callable(_cs_k.values):
+                        cs_values = list(_cs_k.values()) or []
+                    elif hasattr(_cs_k, "enumerationItems") and callable(_cs_k.enumerationItems):
+                        cs_values = list(_cs_k.enumerationItems()) or []
+                except Exception:
+                    pass
+                if not cs_values:
+                    cs_values = ["default", "linear", "sRGB", "Gamma1.8", "Gamma2.2",
+                                 "Rec709", "ACEScg", "ALEXAV3LogC"]
+                current_cs = str(read_node["colorspace"].value())
+                if current_cs not in cs_values:
+                    cs_values.insert(0, current_cs)
+                cs_knob = nuke.Enumeration_Knob("veo_colorspace", cs_label, cs_values)
+                cs_knob.setValue(current_cs)
                 cs_knob.setFlag(nuke.STARTLINE)
                 group.addKnob(cs_knob)
                 _sync_pairs.append(("veo_colorspace", "colorspace"))
@@ -777,30 +792,45 @@ try:
             open_btn.setFlag(nuke.STARTLINE)
             group.addKnob(open_btn)
 
-            # --- knobChanged: sync all exposed knobs → internal Read via name lookup ---
+            # --- knobChanged: sync all exposed knobs <-> internal Read via name lookup ---
+            # NOTE: Nuke executes this as standalone script (NOT inside a function),
+            #       so we must NOT use 'return' - use if/else guards instead.
             _pairs_str = repr(_sync_pairs).replace("'", '"')
             kc_script = (
                 "import nuke\n"
                 "n = nuke.thisNode()\n"
                 "k = nuke.thisKnob()\n"
                 "kn = k.name()\n"
-                "# Sync file\n"
-                "if kn == 'veo_file':\n"
-                "    n.begin()\n"
-                "    r = nuke.toNode('InternalRead')\n"
-                "    n.end()\n"
-                "    if r:\n"
-                "        r['file'].fromUserText(k.value())\n"
-                "    return\n"
-                "# Sync other read knobs\n"
+                "n.begin()\n"
+                "r = nuke.toNode('InternalRead')\n"
+                "n.end()\n"
+                "if not r:\n"
+                "    print('[VEO] ERR: InternalRead not found!')\n"
+                "# File changed: load + pull fresh values from Read\n"
+                "if kn == 'veo_file' and r:\n"
+                "    r['file'].fromUserText(k.value())\n"
+                "    try:\n"
+                "        n['veo_format'].setValue(r['format'].value())\n"
+                "        print('[VEO] fmt=' + str(r['format'].value()))\n"
+                "    except Exception as e:\n"
+                "        print('[VEO] ERR fmt: ' + str(e))\n"
+                "    try:\n"
+                "        n['veo_colorspace'].setValue(str(r['colorspace'].value()))\n"
+                "        print('[VEO] cs=' + str(r['colorspace'].value()))\n"
+                "    except Exception as e:\n"
+                "        print('[VEO] ERR cs: ' + str(e))\n"
+                "# Sync Group->Read for all other exposed knobs\n"
                 "_pairs = " + _pairs_str + "\n"
                 "for _gk, _rk in _pairs:\n"
-                "    if kn == _gk:\n"
-                "        n.begin()\n"
-                "        r = nuke.toNode('InternalRead')\n"
-                "        n.end()\n"
-                "        if r and _rk in r.knobs():\n"
-                "            r[_rk].setValue(int(k.value()))\n"
+                "    if kn == _gk and r and _rk in r.knobs():\n"
+                "        try:\n"
+                "            if isinstance(r[_rk].value(), int):\n"
+                "                r[_rk].setValue(int(k.value()))\n"
+                "            else:\n"
+                "                r[_rk].setValue(k.value())\n"
+                "            print('[VEO] synced %s' % _gk)\n"
+                "        except Exception as e:\n"
+                "            print('[VEO] ERR sync %s: ' % _gk + str(e))\n"
             )
             group["knobChanged"].setValue(kc_script)
 
