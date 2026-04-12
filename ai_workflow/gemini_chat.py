@@ -676,6 +676,48 @@ class _ThumbCard(QtWidgets.QFrame):
         self._remove_btn.hide()
         super(_ThumbCard, self).leaveEvent(event)
 
+    # ---- Left-click drag-to-reorder support ----
+    def mousePressEvent(self, event):
+        """Start a left-drag if user presses left button on the card."""
+        if event.button() == QtCore.Qt.LeftButton and not self._remove_btn.underMouse():
+            self._drag_start_pos = event.pos()
+            self._is_dragging = False
+        else:
+            super(_ThumbCard, self).mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """If moved far enough from press position, begin card drag-reorder."""
+        if hasattr(self, '_drag_start_pos') and self._drag_start_pos is not None:
+            if (event.pos() - self._drag_start_pos).manhattanLength() > 12:
+                self._is_dragging = True
+                # Notify parent ImageStrip that we want to start dragging
+                strip = self._find_parent_strip()
+                if strip is not None:
+                    strip._start_card_drag(self)
+                return
+        super(_ThumbCard, self).mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """End drag on left release."""
+        if hasattr(self, '_is_dragging') and self._is_dragging:
+            strip = self._find_parent_strip()
+            if strip is not None:
+                strip._end_card_drag(self)
+            self._is_dragging = False
+            self._drag_start_pos = None
+            return
+        self._drag_start_pos = None
+        super(_ThumbCard, self).mouseReleaseEvent(event)
+
+    def _find_parent_strip(self):
+        """Walk up parent chain to find the owning ImageStrip widget."""
+        w = self.parent() if hasattr(self, 'parent') and callable(self.parent) else None
+        while w is not None:
+            if isinstance(w, ImageStrip):
+                return w
+            w = w.parent() if hasattr(w, 'parent') and callable(w.parent) else None
+        return None
+
     def mouseDoubleClickEvent(self, event):
         """Open image with system default viewer on double-click."""
         import subprocess
@@ -770,6 +812,13 @@ class ImageStrip(QtWidgets.QWidget):
         self._mid_drag_start_x = 0   # mouse X at drag start
         self._mid_drag_start_val = 0  # scrollbar value at drag start
 
+        # ---- Card reorder-drag state ----
+        self._drag_card = None           # _ThumbCard currently being dragged (or None)
+        self._drag_offset_x = 0          # horizontal offset from mouse to card left edge
+        self._drag_orig_index = -1       # original index of dragged card in _images
+        self._drag_placeholder = None    # placeholder widget inserted at drag position
+        self._drop_indicator = None      # semi-transparent overlay showing drop target position
+
         # Register with the app-level wheel grabber so scrolling works
         # even when Nuke intercepts wheel events at a higher level.
         _ImageStripWheelGrabber.register(self)
@@ -835,11 +884,16 @@ class ImageStrip(QtWidgets.QWidget):
                 return True
 
         # ---- Middle-button move → drag scroll ----
-        if etype == QtCore.QEvent.MouseMove and self._mid_drag:
-            dx = event.globalX() - self._mid_drag_start_x
-            sb = self._scroll.horizontalScrollBar()
-            sb.setValue(self._mid_drag_start_val - dx)
-            return True
+        if etype == QtCore.QEvent.MouseMove:
+            if self._mid_drag:
+                dx = event.globalX() - self._mid_drag_start_x
+                sb = self._scroll.horizontalScrollBar()
+                sb.setValue(self._mid_drag_start_val - dx)
+                return True
+            # ---- Card reorder-drag: track mouse position ----
+            elif self._drag_card is not None:
+                self._update_card_drag()
+                return True
 
         # ---- Middle-button release → end drag ----
         if etype == QtCore.QEvent.MouseButtonRelease and self._mid_drag:
@@ -847,6 +901,12 @@ class ImageStrip(QtWidgets.QWidget):
                 self._mid_drag = False
                 viewport.setCursor(QtCore.Qt.ArrowCursor)
                 print("[NB ImageStrip] mid-drag end")
+                return True
+
+        # ---- Left-button release during card drag → finish reorder ----
+        if etype == QtCore.QEvent.MouseButtonRelease and self._drag_card is not None:
+            if event.button() == QtCore.Qt.LeftButton:
+                self._end_card_drag(self._drag_card)
                 return True
 
         return super(ImageStrip, self).eventFilter(obj, event)
@@ -935,6 +995,166 @@ class ImageStrip(QtWidgets.QWidget):
             self._images.remove(path)
             self._rebuild()
             self.imagesChanged.emit()
+
+    # ---- Card drag-to-reorder methods (called by _ThumbCard) ----
+    def _start_card_drag(self, card):
+        """Begin dragging a thumbnail card for reordering."""
+        if self._drag_card is not None:
+            return  # already dragging
+
+        # Find the index of this card in _images
+        try:
+            idx = self._images.index(card._img_path)
+        except ValueError:
+            return
+
+        self._drag_card = card
+        self._drag_orig_index = idx
+
+        # Calculate offset from mouse to card left edge (in inner widget coords)
+        card_global_pos = card.mapToGlobal(QtCore.QPoint(0, 0))
+        cursor_pos = QtGui.QCursor.pos()
+        self._drag_offset_x = cursor_pos.x() - card_global_pos.x()
+
+        # Hide the remove button during drag
+        card._remove_btn.hide()
+
+        # Make the dragged card semi-transparent with subtle border (no heavy visual)
+        card.setWindowFlags(card.windowFlags() | QtCore.Qt.WindowStaysOnTopHint)
+        card.setStyleSheet(
+            "QFrame { background: rgba(60, 60, 60, 200); border: 1px solid #888888; "
+            "border-radius: 4px; }")
+        card.raise_()
+        card.show()
+        card.grabMouse()
+
+        # Insert a transparent placeholder at the original position (invisible to user)
+        placeholder = QtWidgets.QFrame()
+        placeholder.setFixedSize(64, 64)
+        placeholder.setStyleSheet("QFrame { background: transparent; border: none; }")
+        self._layout.insertWidget(idx, placeholder)
+        self._drag_placeholder = placeholder
+        self._drag_current_index = idx
+
+        print("[NB ImageStrip] Drag started: card '{}' from index {}".format(card._img_path, idx))
+
+    def _update_card_drag(self):
+        """Update drag position during mouse move. Called via event filter on _inner."""
+        if self._drag_card is None:
+            return
+
+        # Move the floating card with the cursor
+        cursor = QtGui.QCursor.pos()
+        new_x = cursor.x() - self._drag_offset_x
+        # Map to inner widget coordinates
+        inner_global = self._inner.mapToGlobal(QtCore.QPoint(0, 0))
+        local_x = new_x - inner_global.x() + self._scroll.horizontalScrollBar().value()
+        local_y = 4  # small top margin within the strip
+
+        self._drag_card.move(local_x, local_y)
+
+        # Determine which position we're hovering over for drop indicator
+        card_center_x = local_x + 32  # center of the 64px card
+        target_index = self._calculate_drop_index(card_center_x)
+
+        if target_index != self._drag_current_index:
+            self._move_placeholder(target_index)
+            self._drag_current_index = target_index
+
+    def _calculate_drop_index(self, drop_x):
+        """Calculate which index a card at horizontal position *drop_x* would occupy."""
+        n = len(self._images)
+        if n <= 1:
+            return 0
+        card_w = 64
+        spacing = 4
+        for i in range(n):
+            left = i * (card_w + spacing)
+            right = left + card_w
+            mid = left + card_w / 2.0
+            if drop_x < mid:
+                return i
+        return n - 1
+
+    def _move_placeholder(self, new_index):
+        """Move the placeholder widget to *new_index* in the layout."""
+        if self._drag_placeholder is None:
+            return
+        old_index = self._layout.indexOf(self._drag_placeholder)
+        if old_index == -1 or old_index == new_index:
+            return
+        self._layout.removeWidget(self._drag_placeholder)
+        self._layout.insertWidget(new_index, self._drag_placeholder)
+
+    def _end_card_drag(self, card):
+        """Finish drag: reorder _images list, cleanup visual state."""
+        if self._drag_card is None or self._drag_card != card:
+            return
+
+        final_index = self._drag_current_index
+        orig_index = self._drag_orig_index
+
+        print("[NB ImageStrip] Drag ended: {} -> {}".format(orig_index, final_index))
+
+        # Release mouse grab & restore card appearance
+        try:
+            card.releaseMouse()
+        except Exception:
+            pass
+        card.setWindowFlags(card.windowFlags() & ~QtCore.Qt.WindowStaysOnTopHint)
+        card.setParent(self._inner)  # re-parent back into scroll area
+        card.setStyleSheet("")
+        card.show()
+
+        # Remove placeholder
+        if self._drag_placeholder is not None:
+            self._layout.removeWidget(self._drag_placeholder)
+            self._drag_placeholder.deleteLater()
+            self._drag_placeholder = None
+
+        # Reorder the _images list if index actually changed
+        if orig_index != final_index:
+            item = self._images.pop(orig_index)
+            self._images.insert(final_index, item)
+            print("[NB ImageStrip] Images reordered: moved '{}' to index {}".format(item, final_index))
+
+        # Reset state
+        self._drag_card = None
+        self._drag_offset_x = 0
+        self._drag_orig_index = -1
+        self._drag_current_index = -1
+
+        # Rebuild the entire strip (clean up any visual artifacts)
+        self._rebuild()
+
+        # Emit change signal so parent saves updated order
+        self.imagesChanged.emit()
+
+    def _cancel_card_drag(self):
+        """Cancel an in-progress drag without applying changes."""
+        if self._drag_card is None:
+            return
+        card = self._drag_card
+
+        try:
+            card.releaseMouse()
+        except Exception:
+            pass
+        card.setWindowFlags(card.windowFlags() & ~QtCore.Qt.WindowStaysOnTopHint)
+        card.setParent(self._inner)
+        card.setStyleSheet("")
+        card.show()
+
+        if self._drag_placeholder is not None:
+            self._layout.removeWidget(self._drag_placeholder)
+            self._drag_placeholder.deleteLater()
+            self._drag_placeholder = None
+
+        self._drag_card = None
+        self._rebuild()
+
+
+
 
 
 # ---------------------------------------------------------------------------
