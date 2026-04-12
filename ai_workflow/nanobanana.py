@@ -880,19 +880,37 @@ def create_nb_player_node(image_path=None, name=None, xpos=None, ypos=None,
             file_knob.setValue(image_path.replace("\\", "/"))
         group.addKnob(file_knob)
 
-        # --- format (read-only display) ---
+        # Track which knobs need syncing between Group panel <-> internal Read
+        _read_sync_knobs = []
+
+        # --- format (dropdown, like native Read) ---
+        # Format_Knob has no enumValues; use nuke.formats() to build dropdown.
+        fmt_values = []
         try:
-            fmt_val = read_node["format"].value()
-            format_knob = nuke.String_Knob("nb_format", "format")
-            format_knob.setEnabled(False)
-            format_knob.setValue(fmt_val)
-            group.addKnob(format_knob)
+            for _f in nuke.formats():
+                _fn = _f.name()
+                if _fn:
+                    fmt_values.append(_fn)
         except Exception:
             pass
+        if not fmt_values:
+            fmt_values = ["---"]
+        fmt_current = "---"
+        try:
+            _fv = read_node["format"].value()
+            if hasattr(_fv, 'width') and _fv.width() > 0:
+                fmt_current = '%dx%d' % (_fv.width(), _fv.height())
+            elif hasattr(_fv, 'name') and _fv.name():
+                fmt_current = _fv.name()
+        except Exception:
+            pass
+        format_knob = nuke.Enumeration_Knob("nb_format", "format", fmt_values)
+        format_knob.setValue(fmt_current)
+        group.addKnob(format_knob)
+        _read_sync_knobs.append(("nb_format", "format"))
 
         # --- colorspace (Input Transform), premultiplied, raw, auto_alpha ---
         # Use real knobs, NOT Link_Knob. colorspace uses Enumeration_Knob for dropdown.
-        _read_sync_knobs = []  # track which knobs need syncing to internal Read
 
         if "colorspace" in read_node.knobs():
             cs_label = read_node["colorspace"].label() or "colorspace"
@@ -964,8 +982,17 @@ def create_nb_player_node(image_path=None, name=None, xpos=None, ypos=None,
             "    r['file'].fromUserText(k.value())\n"
             "    try:\n"
             "        _fv = r['format'].value()\n"
-            "        n['nb_format'].setValue(_fv)\n"
-            "        print('[NV] fmt=' + str(_fv))\n"
+            "        _fn = ''\n"
+            "        if hasattr(_fv, 'width') and _fv.width() > 0:\n"
+            "            _fn = '%dx%d' % (_fv.width(), _fv.height())\n"
+            "        elif isinstance(_fv, str) and _fv:\n"
+            "            _fn = _fv\n"
+            "        if _fn:\n"
+            "            _cur = list(n['nb_format'].values())\n"
+            "            if _fn not in _cur:\n"
+            "                n['nb_format'].setValues(_cur + [_fn])\n"
+            "            n['nb_format'].setValue(_fn)\n"
+            "        print('[NV] fmt=' + repr(_fn))\n"
             "    except Exception as ex:\n"
             "        print('[NV] ERR fmt: ' + str(ex))\n"
             "    try:\n"
@@ -979,10 +1006,12 @@ def create_nb_player_node(image_path=None, name=None, xpos=None, ypos=None,
             "for _gk, _rk in _pairs:\n"
             "    if kn == _gk and r and _rk in r.knobs():\n"
             "        try:\n"
-            "            if isinstance(r[_rk].value(), int):\n"
-                "                r[_rk].setValue(int(k.value()))\n"
+            "            if _rk == 'format':\n"
+            "                r['format'].setValue(k.value())\n"
+            "            elif isinstance(r[_rk].value(), int):\n"
+            "                r[_rk].setValue(int(k.value()))\n"
             "            else:\n"
-                "                r[_rk].setValue(k.value())\n"
+            "                r[_rk].setValue(k.value())\n"
             "            print('[NV] synced %s' % _gk)\n"
             "        except Exception as ex:\n"
             "            print('[NV] ERR sync %s: ' % _gk + str(ex))\n"

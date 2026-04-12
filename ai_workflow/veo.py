@@ -33,15 +33,15 @@ except ImportError:
 
 import nuke
 import nukescripts
-    import os
-    import json
-    import tempfile
-    import time
-    import datetime
+import os
+import json
+import tempfile
+import time
+import datetime
 
-    # Google GenAI SDK
-    from google import genai
-    from google.genai import types
+# Google GenAI SDK
+from google import genai
+from google.genai import types
 
     # Import shared settings from nanobanana
     from ai_workflow.nanobanana import (
@@ -658,14 +658,31 @@ import nukescripts
             # Track all synced knob pairs: (group_knob_name, internal_read_knob_name)
             _sync_pairs = []
 
-            # format (read-only display)
+            # format (dropdown, like native Read)
+            # Format_Knob has no enumValues; use nuke.formats() to build dropdown.
+            fmt_values = []
             try:
-                fmt_knob = nuke.String_Knob("veo_format", "format")
-                fmt_knob.setEnabled(False)
-                fmt_knob.setValue(str(read_node["format"].value()))
-                group.addKnob(fmt_knob)
+                for _f in nuke.formats():
+                    _fn = _f.name()
+                    if _fn:
+                        fmt_values.append(_fn)
             except Exception:
                 pass
+            if not fmt_values:
+                fmt_values = ["---"]
+            fmt_current = "---"
+            try:
+                _fv = read_node["format"].value()
+                if hasattr(_fv, 'width') and _fv.width() > 0:
+                    fmt_current = '%dx%d' % (_fv.width(), _fv.height())
+                elif hasattr(_fv, 'name') and _fv.name():
+                    fmt_current = _fv.name()
+            except Exception:
+                pass
+            fmt_knob = nuke.Enumeration_Knob("veo_format", "format", fmt_values)
+            fmt_knob.setValue(fmt_current)
+            group.addKnob(fmt_knob)
+            _sync_pairs.append(("veo_format", "format"))
 
             # frame range: first, last
             _frame_knobs = []
@@ -809,9 +826,19 @@ import nukescripts
                 "# File changed: load + pull fresh values from Read\n"
                 "if kn == 'veo_file' and r:\n"
                 "    r['file'].fromUserText(k.value())\n"
-                "    try:\n"
-                "        n['veo_format'].setValue(r['format'].value())\n"
-                "        print('[VEO] fmt=' + str(r['format'].value()))\n"
+            "    try:\n"
+            "        _fv = r['format'].value()\n"
+            "        _fn = ''\n"
+            "        if hasattr(_fv, 'width') and _fv.width() > 0:\n"
+            "            _fn = '%dx%d' % (_fv.width(), _fv.height())\n"
+            "        elif isinstance(_fv, str) and _fv:\n"
+            "            _fn = _fv\n"
+            "        if _fn:\n"
+            "            _cur = list(n['veo_format'].values())\n"
+            "            if _fn not in _cur:\n"
+            "                n['veo_format'].setValues(_cur + [_fn])\n"
+            "            n['veo_format'].setValue(_fn)\n"
+            "        print('[VEO] fmt=' + repr(_fn))\n"
                 "    except Exception as e:\n"
                 "        print('[VEO] ERR fmt: ' + str(e))\n"
                 "    try:\n"
@@ -824,7 +851,9 @@ import nukescripts
                 "for _gk, _rk in _pairs:\n"
                 "    if kn == _gk and r and _rk in r.knobs():\n"
                 "        try:\n"
-                "            if isinstance(r[_rk].value(), int):\n"
+                "            if _rk == 'format':\n"
+                "                r['format'].setValue(k.value())\n"
+                "            elif isinstance(r[_rk].value(), int):\n"
                 "                r[_rk].setValue(int(k.value()))\n"
                 "            else:\n"
                 "                r[_rk].setValue(k.value())\n"
