@@ -3664,18 +3664,41 @@ class _NanoBananaPlayerRegenPanel(QtWidgets.QWidget):
         widget_ref = self
         node_ref = self.node
 
-        def _on_finished(path, metadata):
-            try:
-                widget_ref._toggle_ui(False)
-                s = metadata.get("seed", "N/A")
-                widget_ref.status_label.setStyleSheet("color: #3CB371; font-size: 11px;")
-                widget_ref.status_label.setText("Done! Seed: {}".format(s))
-                widget_ref.info_labels["seed"].setText(str(s))
-            except Exception:
-                pass
+        # --- Register in global status bar progress manager ---
+        try:
+            from ai_workflow.status_bar import task_progress_manager
+            status_tid = task_progress_manager.add_task(node_ref.name(), "image")
+            worker.status_update.connect(
+                lambda s: task_progress_manager.update_status(status_tid, s))
+        except Exception:
+            status_tid = None
 
-            if path and os.path.exists(path):
-                def _update_read():
+        worker_id = id(worker)
+        _active_workers[worker_id] = {"worker": worker, "params": {}}
+
+        # ---- Direct callbacks (called from Worker.run() — immune to Qt signal loss) ----
+        def _direct_on_finished(path, metadata):
+            """Called from worker thread when generation succeeds."""
+            # Complete global status bar task
+            if status_tid:
+                try:
+                    from ai_workflow.status_bar import task_progress_manager as _tpm
+                    _tpm.complete_task(status_tid, "Image generated!")
+                except Exception:
+                    pass
+
+            s = metadata.get("seed", "N/A")
+
+            def _update_ui():
+                try:
+                    widget_ref._toggle_ui(False)
+                    widget_ref.status_label.setStyleSheet("color: #3CB371; font-size: 11px;")
+                    widget_ref.status_label.setText("Done! Seed: {}".format(s))
+                    widget_ref.info_labels["seed"].setText(str(s))
+                except Exception:
+                    pass
+
+                if path and os.path.exists(path):
                     try:
                         internal_read = _get_internal_read_nb(node_ref)
                         if internal_read:
@@ -3685,52 +3708,39 @@ class _NanoBananaPlayerRegenPanel(QtWidgets.QWidget):
                             new_seed = metadata.get("seed", s)
                             widget_ref.info_labels["seed"].setText(str(new_seed))
                             node_ref["nb_seed"].setValue(int(new_seed) if new_seed else 0)
-                            # Update the node thumbnail
                             _update_node_thumbnail(node_ref, path)
-                            try:
-                                nuke.connectViewer(0, internal_read)
-                            except:
-                                pass
+                            nuke.connectViewer(0, internal_read)
                     except Exception as e:
                         print("[NB Player Regen] ERROR updating: {}".format(e))
-                    finally:
-                        _active_workers.pop(worker_id, None)
-                nuke.executeInMainThread(_update_read)
-            else:
-                _active_workers.pop(worker_id, None)
 
-        def _on_error(err):
-            try:
-                widget_ref._toggle_ui(False)
-                widget_ref.status_label.setStyleSheet("color: #ef4444; font-size: 11px;")
-                widget_ref.status_label.setText("Error")
-            except:
-                pass
+            nuke.executeInMainThread(_update_ui)
+            _active_workers.pop(worker_id, None)
+
+        def _direct_on_error(err):
+            """Called from worker thread on error."""
+            if status_tid:
+                try:
+                    from ai_workflow.status_bar import task_progress_manager as _tpm
+                    _tpm.error_task(status_tid, str(err)[:80])
+                except Exception:
+                    pass
+
+            def _update_ui():
+                try:
+                    widget_ref._toggle_ui(False)
+                    widget_ref.status_label.setStyleSheet("color: #ef4444; font-size: 11px;")
+                    widget_ref.status_label.setText("Error")
+                except Exception:
+                    pass
+            nuke.executeInMainThread(_update_ui)
+
             _active_workers.pop(worker_id, None)
             nuke.executeInMainThread(nuke.message,
                                      args=("Regeneration Error:\n{}".format(err),))
 
-        worker.finished.connect(_on_finished)
-        worker.error.connect(_on_error)
-        worker.status_update.connect(
-            lambda s: widget_ref.status_label.setText(s) if widget_ref else None)
-
-        worker_id = id(worker)
-        _active_workers[worker_id] = {"worker": worker, "params": {}}
-
-        try:
-            from ai_workflow.status_bar import task_progress_manager
-            status_tid = task_progress_manager.add_task(node_ref.name(), "image")
-            worker.status_update.connect(
-                lambda s: task_progress_manager.update_status(status_tid, s))
-            worker.finished.connect(
-                lambda p, m, tid=status_tid:
-                    task_progress_manager.complete_task(tid, "Done!"))
-            worker.error.connect(
-                lambda e, tid=status_tid:
-                    task_progress_manager.error_task(tid, str(e)[:80]))
-        except Exception:
-            pass
+        # Assign direct callbacks to worker (called from run() regardless of signal state)
+        worker._on_finished_cb = _direct_on_finished
+        worker._on_error_cb = _direct_on_error
 
         worker.start()
 
