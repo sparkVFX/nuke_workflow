@@ -1477,9 +1477,8 @@ class NanoBananaWidget(QtWidgets.QWidget):
 
         # === Negative Prompt ===
         self.neg_prompt_edit = QtWidgets.QTextEdit()
-        self.neg_prompt_edit.setPlaceholderText("Negative Prompt (Optional)...")
-        self.neg_prompt_edit.setMinimumHeight(60)
-        self.neg_prompt_edit.textChanged.connect(self._save_all_state_to_node)
+        self.neg_prompt_edit.setPlaceholderText("Negative prompt (optional)...")
+        self.neg_prompt_edit.setFixedHeight(70)
         main.addWidget(self.neg_prompt_edit)
 
         # === Input Info ===
@@ -2185,13 +2184,12 @@ class NanoBananaPromptWidget(QtWidgets.QWidget):
 
         # === Editable Negative Prompt ===
         self.neg_prompt_edit = QtWidgets.QTextEdit()
-        self.neg_prompt_edit.setPlaceholderText("Negative Prompt (Optional)...")
-        self.neg_prompt_edit.setMinimumHeight(30)
+        self.neg_prompt_edit.setPlaceholderText("Negative prompt (optional)...")
+        self.neg_prompt_edit.setFixedHeight(70)
         main.addWidget(self.neg_prompt_edit)
 
         # === Image Reference Strip ===
         from ai_workflow.gemini_chat import ImageStrip, _ThumbCard
-        self._ref_image_strip = ImageStrip(add_callback=self._add_ref_image)
         main.addWidget(self._ref_image_strip)
 
         # === Regenerate Button ===
@@ -3104,13 +3102,16 @@ class _NanoBananaPlayerRegenPanel(QtWidgets.QWidget):
 
         self.neg_edit = QtWidgets.QTextEdit()
         self.neg_edit.setPlaceholderText("Negative prompt (optional)...")
-        self.neg_edit.setMinimumHeight(30)
+        self.neg_edit.setFixedHeight(70)
         main.addWidget(self.neg_edit)
 
         # Image Reference Strip
         from ai_workflow.gemini_chat import ImageStrip, _ThumbCard
         self._ref_image_strip = ImageStrip(add_callback=self._add_ref_image)
         main.addWidget(self._ref_image_strip)
+
+        # REGENERATE BUTTON
+        self.regen_btn = QtWidgets.QPushButton("REGENERATE IMAGE")
 
         # REGENERATE BUTTON
         self.regen_btn = QtWidgets.QPushButton("REGENERATE IMAGE")
