@@ -100,7 +100,7 @@ class DropDownComboBox(QtWidgets.QComboBox):
 
 def _find_ffmpeg():
     """Try to locate ffmpeg executable.
-
+    
     Search order:
     1. Same directory as this script (ai_workflow/ffmpeg.exe)
     2. Nuke's bundled ffmpeg (if exists)
@@ -146,11 +146,11 @@ def _find_ffmpeg():
 
 def _convert_mp4_to_prores(mp4_path, status_callback=None):
     """Convert an MP4 file to ProRes 422 MOV using ffmpeg.
-
+    
     Args:
         mp4_path: Path to the source .mp4 file.
         status_callback: Optional callable(str) for status messages.
-
+    
     Returns:
         mov_path (str) on success, or mp4_path unchanged if ffmpeg is unavailable.
     """
@@ -256,8 +256,7 @@ class VeoWorker(QtCore.QThread):
                  resolution="720P",
                  mode="Text",
                  negative_prompt="",
-                 temp_dir=None, gen_name="VEO_Generate",
-                 on_finished_callback=None, on_error_callback=None):
+                 temp_dir=None, gen_name="VEO_Generate"):
         super(VeoWorker, self).__init__()
         self.api_key = api_key
         self.prompt = prompt
@@ -271,9 +270,6 @@ class VeoWorker(QtCore.QThread):
         self.temp_dir = temp_dir or get_output_directory()
         self.gen_name = gen_name
         self.is_running = True
-        # Direct callbacks that bypass Qt signal system – immune to widget destruction
-        self._on_finished_cb = on_finished_callback
-        self._on_error_cb = on_error_callback
 
     def stop(self):
         self.is_running = False
@@ -290,8 +286,6 @@ class VeoWorker(QtCore.QThread):
                     ref_images.append(_load_image_for_sdk(rp))
 
             if not self.is_running:
-                if self._on_error_cb:
-                    self._on_error_cb("Generation cancelled by user")
                 return
 
             # 2. Build generation config
@@ -408,8 +402,6 @@ class VeoWorker(QtCore.QThread):
             operation = client.models.generate_videos(**generate_kwargs)
 
             if not self.is_running:
-                if self._on_error_cb:
-                    self._on_error_cb("Generation cancelled by user")
                 return
 
             # 4. Poll for completion
@@ -427,16 +419,11 @@ class VeoWorker(QtCore.QThread):
                 operation = client.operations.get(operation)
 
             if not self.is_running:
-                if self._on_error_cb:
-                    self._on_error_cb("Generation cancelled by user")
                 return
 
             if not operation.done:
-                err_msg = "Video generation timed out"
-                self.error.emit(err_msg)
-                if self._on_error_cb:
-                    self._on_error_cb(err_msg)
-                    return
+                self.error.emit("Video generation timed out")
+                return
 
             # 5. Download video
             self.status_update.emit("Downloading video...")
@@ -454,15 +441,9 @@ class VeoWorker(QtCore.QThread):
                 if rai_reasons:
                     reason_str = "; ".join(rai_reasons)
                     print("VEO SDK: Filtered by safety: {}".format(reason_str))
-                    err_msg = "Video blocked by safety filter:\n{}".format(reason_str)
-                    self.error.emit(err_msg)
-                    if self._on_error_cb:
-                        self._on_error_cb(err_msg)
+                    self.error.emit("Video blocked by safety filter:\n{}".format(reason_str))
                 else:
-                    err_msg = "No video generated in response"
-                    self.error.emit(err_msg)
-                    if self._on_error_cb:
-                        self._on_error_cb(err_msg)
+                    self.error.emit("No video generated in response")
                 return
 
             video = generated_videos[0]
@@ -504,17 +485,11 @@ class VeoWorker(QtCore.QThread):
             }
 
             self.finished.emit(final_path, metadata)
-            # Direct callback – works even if widget (signal receiver) is destroyed
-            if self._on_finished_cb:
-                self._on_finished_cb(final_path, metadata)
 
         except Exception as e:
             import traceback
             traceback.print_exc()
-            err_msg = "Error: {}".format(str(e))
-            self.error.emit(err_msg)
-            if self._on_error_cb:
-                self._on_error_cb(err_msg)
+            self.error.emit("Error: {}".format(str(e)))
 
 
 # ---------------------------------------------------------------------------
@@ -618,158 +593,166 @@ def create_veo_player_node(video_path=None, name=None, xpos=None, ypos=None):
     Returns:
         (group_node, internal_read_node) tuple.
     """
-    # Wrap entire node creation as a single undo unit so that
-    # subsequent rename-undo cannot partially break internal structure
-    nuke.Undo.begin("Create VEO Player")
+    # --- Create the Group shell ---
+    group = nuke.nodes.Group()
+    if name:
+        group.setName(name)
+    else:
+        group.setName("VEO_Player1")
+    group["tile_color"].setValue(0x00C878FF)  # Green tint
+    group["label"].setValue("VEO Player")
+
+    if xpos is not None:
+        group["xpos"].setValue(int(xpos))
+    if ypos is not None:
+        group["ypos"].setValue(int(ypos))
+
+    # --- Build internals: Read → Output ---
+    group.begin()
+    read_node = nuke.nodes.Read(name="InternalRead")
+    out_node = nuke.nodes.Output(name="Output")
+    out_node.setInput(0, read_node)
+    group.end()
+
+    # Load the video file AFTER group.end() so knobs are fully populated
+    if video_path and os.path.exists(video_path):
+        group.begin()
+        read_node["file"].fromUserText(video_path)
+        group.end()
+
+    # --- Expose Read-tab knobs on the Group panel ---
+    # Instead of Link_Knob (which doesn't render UI for many knob types),
+    # we add a custom "Open Read Properties" button and a direct knob callback
+    # approach.  The simplest reliable method in Nuke is to use the Group's
+    # built-in "publish" mechanism via TCL, but since that is fragile across
+    # versions we use a pragmatic approach: expose the most important knobs
+    # as real knobs with TCL expression links, and for MOV options use a
+    # dedicated callback.
+
+    # Tab: Read
+    tab_read = nuke.Tab_Knob("read_tab", "Read")
+    group.addKnob(tab_read)
+
+    # Helper: get full TCL path for internal read knob
+    read_full = read_node.fullName()
+
+    # --- file knob (special: File_Knob) ---
+    file_knob = nuke.File_Knob("veo_file", "file")
+    if video_path:
+        file_knob.setValue(video_path.replace("\\", "/"))
+    group.addKnob(file_knob)
+
+    # --- format ---
     try:
-                    _default_name = "VEO_Player1"
-    group = nuke.nodes.Group(name=(name or _default_name))
-            group["tile_color"].setValue(0x00C878FF)  # Green tint
-
-            if xpos is not None:
-                group["xpos"].setValue(int(xpos))
-            if ypos is not None:
-                group["ypos"].setValue(int(ypos))
-
-            # --- Build internals: Read → Output ---
-            group.begin()
-            read_node = nuke.nodes.Read(name="InternalRead")
-            out_node = nuke.nodes.Output(name="Output")
-            out_node.setInput(0, read_node)
-            group.end()
-
-            # Load the video file AFTER group.end() so knobs are fully populated
-            if video_path and os.path.exists(video_path):
-                group.begin()
-                read_node["file"].fromUserText(video_path)
-                group.end()
-
-            # --- Expose Read-tab knobs as REAL knobs (NOT Link_Knob) ---
-            # Link_Knob stores hardcoded TCL paths that break after rename-undo.
-            # Real knobs store values; a knobChanged callback syncs via name lookup.
-            tab_read = nuke.Tab_Knob("read_tab", "Read")
-            group.addKnob(tab_read)
-
-            file_knob = nuke.File_Knob("veo_file", "file")
-            if video_path:
-                file_knob.setValue(video_path.replace("\\", "/"))
-            group.addKnob(file_knob)
-
-            # Track all synced knob pairs: (group_knob_name, internal_read_knob_name)
-            _sync_pairs = []
-
-# format (dropdown, like native Read)
-# Format_Knob has no enumValues; use nuke.formats() to build dropdown.
-fmt_values = []
-            try:
-                for _f in nuke.formats():
-                    _fn = _f.name()
-                if _fn:
-                    fmt_values.append(_fn)
+        link_format = nuke.Link_Knob("format")
+        link_format.makeLink(read_full, "format")
+        link_format.setLabel("format")
+        group.addKnob(link_format)
     except Exception:
         pass
-        if not fmt_values:
-    fmt_values = ["---"]
-fmt_current = "---"
+
+    # --- frame range knobs ---
+    # first and last on the same line
+    if "first" in read_node.knobs():
         try:
-            _fv = read_node["format"].value()
-            if hasattr(_fv, 'width') and _fv.width() > 0:
-                fmt_current = '%dx%d' % (_fv.width(), _fv.height())
-        elif hasattr(_fv, 'name') and _fv.name():
-                fmt_current = _fv.name()
+            link = nuke.Link_Knob("first")
+            link.makeLink(read_full, "first")
+            link.setLabel("first")
+            link.setFlag(nuke.STARTLINE)
+            group.addKnob(link)
         except Exception:
             pass
-    fmt_knob = nuke.Enumeration_Knob("veo_format", "format", fmt_values)
-    fmt_knob.setValue(fmt_current)
-    group.addKnob(fmt_knob)
-    _sync_pairs.append(("veo_format", "format"))
-
-# frame range: first, last
-_frame_knobs = []
-for fname, flabel, is_start in [("first", "first", True), ("last", "last", False)]:
-if fname in read_node.knobs():
-rk = nuke.Int_Knob("veo_" + fname, flabel)
-rk.setValue(int(read_node[fname].value()))
-if is_start:
-rk.setFlag(nuke.STARTLINE)
-else:
-rk.clearFlag(nuke.STARTLINE)
-group.addKnob(rk)
-_sync_pairs.append(("veo_" + fname, fname))
-_frame_knobs.append(fname)
-
-# frame_mode + frame
-for fname, flabel, is_start in [("frame_mode", "frame mode", True), ("frame", "frame", False)]:
-if fname in read_node.knobs():
-rk = nuke.Int_Knob("veo_" + fname, flabel)
-rk.setValue(int(read_node[fname].value()))
-if is_start:
-rk.setFlag(nuke.STARTLINE)
-else:
-rk.clearFlag(nuke.STARTLINE)
-group.addKnob(rk)
-_sync_pairs.append(("veo_" + fname, fname))
-
-# origfirst, origlast
-for fname, flabel, is_start in [("origfirst", "origfirst", True), ("origlast", "origlast", False)]:
-if fname in read_node.knobs():
-rk = nuke.Int_Knob("veo_" + fname, flabel)
-rk.setValue(int(read_node[fname].value()))
-if is_start:
-rk.setFlag(nuke.STARTLINE)
-else:
-rk.clearFlag(nuke.STARTLINE)
-group.addKnob(rk)
-_sync_pairs.append(("veo_" + fname, fname))
-
-# on_error
-if "on_error" in read_node.knobs():
-rk = nuke.Enumeration_Knob("veo_on_error", "missing frames", read_node["on_error"].enumValues())
-rk.setValue(int(read_node["on_error"].value()))
-rk.setFlag(nuke.STARTLINE)
-group.addKnob(rk)
-_sync_pairs.append(("veo_on_error", "on_error"))
-
-# colorspace (dropdown)
-if "colorspace" in read_node.knobs():
-cs_label = read_node["colorspace"].label() or "colorspace"
-cs_values = []
+    if "last" in read_node.knobs():
         try:
-            _cs_k = read_node["colorspace"]
-            if hasattr(_cs_k, "values") and callable(_cs_k.values):
-                cs_values = list(_cs_k.values()) or []
-        elif hasattr(_cs_k, "enumerationItems") and callable(_cs_k.enumerationItems):
-                cs_values = list(_cs_k.enumerationItems()) or []
+            link = nuke.Link_Knob("last")
+            link.makeLink(read_full, "last")
+            link.setLabel("last")
+            link.clearFlag(nuke.STARTLINE)
+            group.addKnob(link)
         except Exception:
             pass
-            if not cs_values:
-                cs_values = ["default", "linear", "sRGB", "Gamma1.8", "Gamma2.2",
-                             "Rec709", "ACEScg", "ALEXAV3LogC"]
-            current_cs = str(read_node["colorspace"].value())
-            if current_cs not in cs_values:
-                cs_values.insert(0, current_cs)
-            cs_knob = nuke.Enumeration_Knob("veo_colorspace", cs_label, cs_values)
-            cs_knob.setValue(current_cs)
-            cs_knob.setFlag(nuke.STARTLINE)
-            group.addKnob(cs_knob)
-            _sync_pairs.append(("veo_colorspace", "colorspace"))
 
+    # frame_mode and frame on the same line
+    if "frame_mode" in read_node.knobs():
+        try:
+            link = nuke.Link_Knob("frame_mode")
+            link.makeLink(read_full, "frame_mode")
+            link.setLabel("frame mode")
+            link.setFlag(nuke.STARTLINE)
+            group.addKnob(link)
+        except Exception:
+            pass
+    if "frame" in read_node.knobs():
+        try:
+            link = nuke.Link_Knob("frame")
+            link.makeLink(read_full, "frame")
+            link.setLabel("frame")
+            link.clearFlag(nuke.STARTLINE)
+            group.addKnob(link)
+        except Exception:
+            pass
+
+    # origfirst and origlast on the same line
+    if "origfirst" in read_node.knobs():
+        try:
+            link = nuke.Link_Knob("origfirst")
+            link.makeLink(read_full, "origfirst")
+            link.setLabel("origfirst")
+            link.setFlag(nuke.STARTLINE)
+            group.addKnob(link)
+        except Exception:
+            pass
+    if "origlast" in read_node.knobs():
+        try:
+            link = nuke.Link_Knob("origlast")
+            link.makeLink(read_full, "origlast")
+            link.setLabel("origlast")
+            link.clearFlag(nuke.STARTLINE)
+            group.addKnob(link)
+        except Exception:
+            pass
+
+    # --- on_error ---
+    if "on_error" in read_node.knobs():
+        try:
+            link = nuke.Link_Knob("on_error")
+            link.makeLink(read_full, "on_error")
+            link.setLabel("missing frames")
+            link.setFlag(nuke.STARTLINE)
+            group.addKnob(link)
+        except Exception:
+            pass
+
+    # --- colorspace (Input Transform), premultiplied, raw, auto_alpha on the same line ---
+    if "colorspace" in read_node.knobs():
+        try:
+            link = nuke.Link_Knob("colorspace")
+            link.makeLink(read_full, "colorspace")
+            link.setLabel(read_node["colorspace"].label() or "colorspace")
+            link.setFlag(nuke.STARTLINE)
+            group.addKnob(link)
+        except Exception:
+            pass
     for kname in ["premultiplied", "raw", "auto_alpha"]:
         if kname in read_node.knobs():
-            klabel = read_node[kname].label() or kname
-            bk = nuke.Boolean_Knob("veo_" + kname, klabel)
-                bk.setValue(int(read_node[kname].value()))
-                bk.clearFlag(nuke.STARTLINE)
-                group.addKnob(bk)
-                _sync_pairs.append(("veo_" + kname, kname))
+            try:
+                link = nuke.Link_Knob(kname)
+                link.makeLink(read_full, kname)
+                link.setLabel(read_node[kname].label() or kname)
+                link.clearFlag(nuke.STARTLINE)
+                group.addKnob(link)
+            except Exception:
+                pass
 
-    # MOV options (read-only display only - too many dynamic knobs to sync reliably)
+    # --- MOV Options section ---
+    # These knobs are dynamically added by Nuke when a MOV file is loaded.
     mov_knob_names = [
         "ycbcr_matrix", "mov_data_range",
         "first_track_only", "metadata", "noprefix", "match_key_format",
         "mov64_decode_codec", "mov_decode_codec",
         "video_codec_knob",
     ]
+
     mov_divider_added = False
     for kname in mov_knob_names:
         if kname in read_node.knobs():
@@ -777,10 +760,15 @@ cs_values = []
                 mov_div = nuke.Text_Knob("mov_divider", "MOV Options")
                 group.addKnob(mov_div)
                 mov_divider_added = True
-            val = str(read_node[kname].value())
-            tk = nuke.Text_Knob("veo_mov_" + kname, read_node[kname].label() or kname, val)
-                group.addKnob(tk)
+            try:
+                link = nuke.Link_Knob(kname)
+                link.makeLink(read_full, kname)
+                link.setLabel(read_node[kname].label() or kname)
+                group.addKnob(link)
+            except Exception:
+                pass
 
+    # If MOV was loaded, also show the video codec as a text display
     if mov_divider_added:
         try:
             codec_val = ""
@@ -794,72 +782,26 @@ cs_values = []
         except Exception:
             pass
 
-    # Open Read Properties button
-    open_read_script = (
-        "n = nuke.thisNode()\n"
-    "n.begin()\n"
-    "r = nuke.toNode('InternalRead')\n"
-    "n.end()\n"
-    "if r:\n"
-    "    nuke.show(r)\n"
-    )
-    open_btn = nuke.PyScript_Knob(
-    "open_read_props", "Open Full Read Properties", open_read_script
-    )
+    # --- Button to open internal Read node's full properties ---
+    open_read_script = "n = nuke.thisNode()\nn.begin()\nr = nuke.toNode('InternalRead')\nn.end()\nif r: nuke.show(r)"
+    open_btn = nuke.PyScript_Knob("open_read_props", "Open Full Read Properties", open_read_script)
     open_btn.setFlag(nuke.STARTLINE)
     group.addKnob(open_btn)
 
-    # --- knobChanged: sync all exposed knobs <-> internal Read via name lookup ---
-    # NOTE: Nuke executes this as standalone script (NOT inside a function),
-    #       so we must NOT use 'return' - use if/else guards instead.
-    _pairs_str = repr(_sync_pairs).replace("'", '"')
+    # --- knobChanged callback to sync veo_file → internal Read's file ---
     kc_script = (
-    "import nuke\n"
         "n = nuke.thisNode()\n"
         "k = nuke.thisKnob()\n"
-        "kn = k.name()\n"
-        "n.begin()\n"
-        "r = nuke.toNode('InternalRead')\n"
-        "n.end()\n"
-        "if not r:\n"
-        "    pass\n"
-        "# File changed: load + pull fresh values from Read\n"
-        "if kn == 'veo_file' and r:\n"
-        "    r['file'].fromUserText(k.value())\n"
-        "    try:\n"
-        "        _fv = r['format'].value()\n"
-        "        _fn = ''\n"
-        "        if hasattr(_fv, 'width') and _fv.width() > 0:\n"
-        "            _fn = '%dx%d' % (_fv.width(), _fv.height())\n"
-        "        elif isinstance(_fv, str) and _fv:\n"
-        "            _fn = _fv\n"
-        "        if _fn:\n"
-        "            _cur = list(n['veo_format'].values())\n"
-        "            if _fn not in _cur:\n"
-        "                n['veo_format'].setValues(_cur + [_fn])\n"
-        "            n['veo_format'].setValue(_fn)\n"
-        "    except Exception:\n"
-        "        pass\n"
-        "    try:\n"
-        "        n['veo_colorspace'].setValue(str(r['colorspace'].value()))\n"
-        "    except Exception:\n"
-        "        pass\n"
-        "# Sync Group->Read for all other exposed knobs\n"
-        "_pairs = " + _pairs_str + "\n"
-        "for _gk, _rk in _pairs:\n"
-        "    if kn == _gk and r and _rk in r.knobs():\n"
-        "        try:\n"
-        "            if _rk == 'format':\n"
-        "                r['format'].setValue(k.value())\n"
-        "            elif isinstance(r[_rk].value(), int):\n"
-        "                r[_rk].setValue(int(k.value()))\n"
-        "            else:\n"
-        "                r[_rk].setValue(k.value())\n"
-        "        except Exception:\n"
-        "            pass\n"
+        "if k.name() == 'veo_file':\n"
+        "    n.begin()\n"
+        "    r = nuke.toNode('InternalRead')\n"
+        "    n.end()\n"
+        "    if r:\n"
+        "        r['file'].fromUserText(k.value())\n"
     )
     group["knobChanged"].setValue(kc_script)
 
+    # --- Divider + Send to Studio button ---
     divider = nuke.Text_Knob("studio_divider", "")
     group.addKnob(divider)
 
@@ -867,6 +809,7 @@ cs_values = []
     btn.setFlag(nuke.STARTLINE)
     group.addKnob(btn)
 
+    # Hidden marker knob so we can identify VEO Player nodes later
     marker = nuke.Boolean_Knob("is_veo_player", "")
     marker.setValue(True)
     marker.setFlag(nuke.INVISIBLE)
@@ -874,8 +817,6 @@ cs_values = []
 
     print("VEO: Created VEO Player '{}' with internal Read".format(group.name()))
     return group, read_node
-    finally:
-        nuke.Undo.end()
 
 
 def _get_internal_read(player_group):
@@ -1582,7 +1523,7 @@ class VeoWidget(QtWidgets.QWidget):
         if not self.settings.api_key:
             self.status_label.setStyleSheet("color: #ef4444; font-size: 11px;")
             self.status_label.setText("Please set API key in Settings")
-            nuke.message("API key not set.\nPlease open CompMind > Setting in the toolbar.")
+            nuke.message("API key not set.\nPlease open AI Workflow > Setting in the toolbar.")
             return
 
         if self.current_worker and self.current_worker.is_running:
@@ -1675,32 +1616,16 @@ class VeoWidget(QtWidgets.QWidget):
         # Capture references for closures so they don't depend on self
         widget_ref = self
 
-        # --- Register task in global status bar progress manager ---
-        from ai_workflow.status_bar import task_progress_manager
-            status_task_id = task_progress_manager.add_task(
-            gen_name, "video")
-
-# ---- Direct callbacks (called from Worker.run() in background thread) ----
-# These are NOT Qt signal slots – they are plain Python function calls made
-# directly by the worker thread.  They are immune to Qt signal disconnection
-# that happens when Nuke destroys the PyCustom_Knob widget.
-
-def _direct_on_finished(path, metadata):
-"""Direct callback from worker thread – always fires."""
-# Update global status bar
-task_progress_manager.complete_task(
-status_task_id, "Done! Video: {}".format(os.path.basename(path)))
-
-# UI updates (safe to skip if widget is gone)
-def _update_ui():
+        def _on_finished(path, metadata):
+            """Called when generation finishes. Works even if widget is destroyed."""
             try:
-                if _isValid(widget_ref):
+                _alive = _isValid(widget_ref)
+                if _alive:
                     widget_ref._toggle_stop_ui(False)
                     widget_ref.status_label.setStyleSheet("color: #3CB371; font-size: 11px;")
                     widget_ref.status_label.setText("Done! Video: {}".format(os.path.basename(path)))
             except Exception:
                 pass
-                nuke.executeInMainThread(_update_ui)
 
             if path and os.path.exists(path):
                 params = gen_params
@@ -1728,9 +1653,7 @@ def _update_ui():
                         import traceback
                         print("VEO: ERROR in _create_nodes: {}".format(e))
                         traceback.print_exc()
-                        return group, read_node
                     finally:
-                        nuke.Undo.end()
                         _veo_active_workers.pop(worker_id, None)
                 nuke.executeInMainThread(_create_nodes)
             else:
@@ -1740,37 +1663,25 @@ def _update_ui():
                     args=("Video generation completed but no file was created.\nPath: {}".format(path),)
                 )
 
-        def _direct_on_error(err):
-            """Direct callback from worker thread – always fires."""
-            # Update global status bar
-            task_progress_manager.error_task(status_task_id, str(err)[:80])
-
-def _update_ui():
+        def _on_error(err):
+            """Called on generation error. Works even if widget is destroyed."""
             try:
-                if _isValid(widget_ref):
+                _alive = _isValid(widget_ref)
+                if _alive:
                     widget_ref._toggle_stop_ui(False)
                     widget_ref.status_label.setStyleSheet("color: #ef4444; font-size: 11px;")
                     widget_ref.status_label.setText("Error")
             except Exception:
                 pass
-                nuke.executeInMainThread(_update_ui)
             _veo_active_workers.pop(worker_id, None)
             nuke.executeInMainThread(nuke.message, args=("VEO Error:\n{}".format(err),))
 
-        # Assign direct callbacks to worker (called from run() regardless of signal state)
-        worker._on_finished_cb = _direct_on_finished
-        worker._on_error_cb = _direct_on_error
-
-# Signal connections kept for UI updates while widget is alive
+        worker.finished.connect(_on_finished)
+        worker.error.connect(_on_error)
         worker.status_update.connect(
             lambda s: widget_ref.status_label.setText(s) if _isValid(widget_ref) else None)
         worker.progress_update.connect(
             lambda v: widget_ref.pbar.setValue(v) if _isValid(widget_ref) else None)
-            # Also update global status bar from signals
-            worker.status_update.connect(
-                lambda s: task_progress_manager.update_status(status_task_id, s))
-            worker.progress_update.connect(
-                lambda v: task_progress_manager.update_status(status_task_id, None, progress=v))
         worker.start()
 
     def _toggle_stop_ui(self, is_running):
@@ -2131,7 +2042,7 @@ class VeoRecordWidget(QtWidgets.QWidget):
         if not self.settings.api_key:
             self.status_label.setStyleSheet("color: #ef4444; font-size: 11px;")
             self.status_label.setText("Please set API key in Settings")
-            nuke.message("API key not set.\nPlease open CompMind > Setting in the toolbar.")
+            nuke.message("API key not set.\nPlease open AI Workflow > Setting in the toolbar.")
             return
 
         if self.current_worker and self.current_worker.is_running:
@@ -2216,9 +2127,7 @@ class VeoRecordWidget(QtWidgets.QWidget):
                                 pass
                     except Exception as e:
                         print("VEO: ERROR updating Read node: {}".format(e))
-                        return group, read_node
                     finally:
-                        nuke.Undo.end()
                         _veo_active_workers.pop(worker_id, None)
                 nuke.executeInMainThread(_update)
             else:
@@ -2319,15 +2228,17 @@ def create_veo_node():
     ref_node = input_nodes[0] if input_nodes else None
 
     # Create the main VEO Group node
-    group_node = nuke.nodes.Group(name="VEO_Generate")
+    group_node = nuke.nodes.Group()
+    group_node.setName("VEO_Generate")
     group_node["tile_color"].setValue(0x4169E1FF)  # Royal Blue
+    group_node["label"].setValue("VEO Video Generation")
 
     if ref_node:
         sx = int(ref_node["xpos"].value())
         sy = int(ref_node["ypos"].value())
         group_node["xpos"].setValue(sx)
         group_node["ypos"].setValue(sy + 100)
-        else:
+    else:
         try:
             center = nuke.center()
             x, y = int(center[0]), int(center[1])
