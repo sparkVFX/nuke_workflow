@@ -969,13 +969,11 @@ def create_nb_player_node(image_path=None, name=None, xpos=None, ypos=None,
             "n = nuke.thisNode()\n"
             "k = nuke.thisKnob()\n"
             "kn = k.name()\n"
-            "kv = str(k.value()) if k is not None else 'None'\n"
-            "print('[NV] knob=%s val=%s' % (kn, kv))\n"
             "n.begin()\n"
             "r = nuke.toNode('InternalRead')\n"
             "n.end()\n"
             "if not r:\n"
-            "    print('[NV] ERR: InternalRead not found!')\n"
+            "    pass\n"
             "# NOTE: no 'return' - Nuke runs knobChanged as standalone script, not a function\n"
             "# File changed: load + pull fresh values from Read\n"
             "if kn == 'nb_file' and r:\n"
@@ -992,15 +990,13 @@ def create_nb_player_node(image_path=None, name=None, xpos=None, ypos=None,
             "            if _fn not in _cur:\n"
             "                n['nb_format'].setValues(_cur + [_fn])\n"
             "            n['nb_format'].setValue(_fn)\n"
-            "        print('[NV] fmt=' + repr(_fn))\n"
-            "    except Exception as ex:\n"
-            "        print('[NV] ERR fmt: ' + str(ex))\n"
+            "    except Exception:\n"
+            "        pass\n"
             "    try:\n"
             "        _cv = str(r['colorspace'].value())\n"
             "        n['nb_colorspace'].setValue(_cv)\n"
-            "        print('[NV] cs=' + _cv)\n"
-            "    except Exception as ex:\n"
-            "        print('[NV] ERR cs: ' + str(ex))\n"
+            "    except Exception:\n"
+            "        pass\n"
             "# Sync Group->Read for all other exposed knobs\n"
             "_pairs = " + _sync_pairs_str + "\n"
             "for _gk, _rk in _pairs:\n"
@@ -1012,10 +1008,8 @@ def create_nb_player_node(image_path=None, name=None, xpos=None, ypos=None,
             "                r[_rk].setValue(int(k.value()))\n"
             "            else:\n"
             "                r[_rk].setValue(k.value())\n"
-            "            print('[NV] synced %s' % _gk)\n"
-            "        except Exception as ex:\n"
-            "            print('[NV] ERR sync %s: ' % _gk + str(ex))\n"
-            "print('[NV] done: ' + kn)\n"
+            "        except Exception:\n"
+            "            pass\n"
         )
         group["knobChanged"].setValue(kc_script)
         # --- Divider + Send to Studio button ---
@@ -2192,8 +2186,13 @@ class NanoBananaPromptWidget(QtWidgets.QWidget):
         # === Editable Negative Prompt ===
         self.neg_prompt_edit = QtWidgets.QTextEdit()
         self.neg_prompt_edit.setPlaceholderText("Negative Prompt (Optional)...")
-        self.neg_prompt_edit.setMinimumHeight(60)
+        self.neg_prompt_edit.setMinimumHeight(30)
         main.addWidget(self.neg_prompt_edit)
+
+        # === Image Reference Strip ===
+        from ai_workflow.gemini_chat import ImageStrip, _ThumbCard
+        self._ref_image_strip = ImageStrip(add_callback=self._add_ref_image)
+        main.addWidget(self._ref_image_strip)
 
         # === Regenerate Button ===
         self.regen_btn = QtWidgets.QPushButton("REGENERATE IMAGE")
@@ -2296,8 +2295,43 @@ class NanoBananaPromptWidget(QtWidgets.QWidget):
             self.prompt_edit.setText(prompt)
             self.neg_prompt_edit.setText(neg_prompt)
 
+            # Load cached reference images into strip
+            try:
+                if input_images_json and input_images_json.strip():
+                    input_paths = json.loads(input_images_json)
+                    valid_paths = [p for p in input_paths if p and os.path.exists(p)]
+                    for p in valid_paths:
+                        self._ref_image_strip.add_image(p)
+                else:
+                    self._ref_image_strip.clear_images()
+            except Exception:
+                self._ref_image_strip.clear_images()
+
         except Exception as e:
             print("NanoBanana: Error loading node settings: {}".format(str(e)))
+
+    def _add_ref_image(self):
+        """Open file dialog to add a reference image."""
+        fpath, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Add Reference Image", "",
+            "Images (*.png *.jpg *.jpeg *.gif *.webp);;All Files (*)"
+        )
+        if fpath and os.path.isfile(fpath):
+            self._ref_image_strip.add_image(fpath)
+            self._save_ref_images_to_node()
+
+    def _remove_ref_image_callback(self, path):
+        """Called when a thumbnail's remove button is clicked."""
+        self._ref_image_strip.remove_image(path) if hasattr(self._ref_image_strip, 'remove_image') else None
+        if path in [img.get("path") for img in getattr(self, '_cached_ref_imgs', [])]:
+            self._save_ref_images_to_node()
+
+    def _save_ref_images_to_node(self):
+        """Save current reference images list to node knob."""
+        if not self.node or "nb_input_images" not in self.node.knobs():
+            return
+        paths = self._ref_image_strip.images
+        self.node["nb_input_images"].setValue(json.dumps(paths))
 
     def _regenerate(self):
         """Regenerate using the editable parameters and cached input images."""
@@ -2333,22 +2367,27 @@ class NanoBananaPromptWidget(QtWidgets.QWidget):
             except ValueError:
                 seed = random.randint(0, 2147483647)
 
-        # Collect cached input images from node
+        # Collect input images: prefer strip images, fall back to cached
         images_info = []
+        strip_images = self._ref_image_strip.images if hasattr(self, '_ref_image_strip') else []
+        source_images = strip_images if strip_images else []
+        # Also merge with cached images not already in strip
         if "nb_input_images" in self.node.knobs():
             try:
-                input_paths = json.loads(self.node["nb_input_images"].value())
-                for idx, p in enumerate(input_paths):
-                    if p and os.path.exists(p):
-                        images_info.append({
-                            "index": idx,
-                            "name": "img{}".format(idx + 1),
-                            "path": p,
-                            "connected": True,
-                            "node_name": "cached"
-                        })
+                cached_paths = json.loads(self.node["nb_input_images"].value())
+                for p in cached_paths:
+                    if p and os.path.exists(p) and p not in source_images:
+                        source_images.append(p)
             except:
                 pass
+        for idx, p in enumerate(source_images):
+            images_info.append({
+                "index": idx,
+                "name": "img{}".format(idx + 1),
+                "path": p,
+                "connected": True,
+                "node_name": "user_ref" if idx < len(strip_images) else "cached"
+            })
 
         self.status_label.setStyleSheet("color: #facc15; font-size: 11px;")
         self.status_label.setText("Regenerating (Seed: {})...".format(seed))
@@ -3065,8 +3104,13 @@ class _NanoBananaPlayerRegenPanel(QtWidgets.QWidget):
 
         self.neg_edit = QtWidgets.QTextEdit()
         self.neg_edit.setPlaceholderText("Negative prompt (optional)...")
-        self.neg_edit.setMinimumHeight(50)
+        self.neg_edit.setMinimumHeight(30)
         main.addWidget(self.neg_edit)
+
+        # Image Reference Strip
+        from ai_workflow.gemini_chat import ImageStrip, _ThumbCard
+        self._ref_image_strip = ImageStrip(add_callback=self._add_ref_image)
+        main.addWidget(self._ref_image_strip)
 
         # REGENERATE BUTTON
         self.regen_btn = QtWidgets.QPushButton("REGENERATE IMAGE")
@@ -3141,6 +3185,34 @@ class _NanoBananaPlayerRegenPanel(QtWidgets.QWidget):
             self.prompt_edit.setPlainText(node["nb_prompt"].value() or "")
         if "nb_neg_prompt" in node.knobs():
             self.neg_edit.setPlainText(node["nb_neg_prompt"].value() or "")
+        # Load cached reference images into strip
+        try:
+            if "nb_input_images" in node.knobs():
+                input_json = node["nb_input_images"].value()
+                if input_json and input_json.strip():
+                    paths = json.loads(input_json)
+                    for p in [x for x in (paths or []) if x and os.path.exists(x)]:
+                        self._ref_image_strip.add_image(p)
+                else:
+                    self._ref_image_strip.clear_images()
+            else:
+                self._ref_image_strip.clear_images()
+        except Exception:
+            self._ref_image_strip.clear_images()
+
+    def _add_ref_image(self):
+        fpath, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Add Reference Image", "",
+            "Images (*.png *.jpg *.jpeg *.gif *.webp);;All Files (*)"
+        )
+        if fpath and os.path.isfile(fpath):
+            self._ref_image_strip.add_image(fpath)
+            self._save_ref_images_to_node()
+
+    def _save_ref_images_to_node(self):
+        if not self.node or "nb_input_images" not in self.node.knobs():
+            return
+        self.node["nb_input_images"].setValue(json.dumps(self._ref_image_strip.images))
 
     def _save_state_to_node(self):
         """Save current editable values back to the node's hidden knobs."""
@@ -3165,6 +3237,8 @@ class _NanoBananaPlayerRegenPanel(QtWidgets.QWidget):
                 self.node["nb_prompt"].setValue(self.prompt_edit.toPlainText())
             if "nb_neg_prompt" in self.node.knobs():
                 self.node["nb_neg_prompt"].setValue(self.neg_edit.toPlainText())
+            if "nb_input_images" in self.node.knobs():
+                self.node["nb_input_images"].setValue(json.dumps(self._ref_image_strip.images))
         except Exception as e:
             print("[NB Player Regen] Error saving state: {}".format(e))
 
