@@ -555,6 +555,56 @@ class ChatBubble(QtWidgets.QFrame):
 # ---------------------------------------------------------------------------
 # Image Thumbnail Strip
 # ---------------------------------------------------------------------------
+
+class _ImageStripWheelGrabber(QtCore.QObject):
+    """Application-level event filter that intercepts Wheel events *before*
+    Nuke's own handlers consume them.  It checks whether the mouse cursor
+    is inside any registered ImageStrip widget and, if so, forwards the
+    event to that strip's ``_handle_wheel`` method."""
+
+    _instance = None          # singleton
+    _strips = []              # registered ImageStrip widgets (weak-ish list)
+
+    @classmethod
+    def ensure_installed(cls):
+        """Install the global filter exactly once per QApplication."""
+        if cls._instance is None:
+            app = QtWidgets.QApplication.instance()
+            if app is not None:
+                cls._instance = cls(app)
+                app.installEventFilter(cls._instance)
+                print("[NB ImageStrip] Global wheel grabber installed")
+        return cls._instance
+
+    @classmethod
+    def register(cls, strip):
+        inst = cls.ensure_installed()
+        if strip not in cls._strips:
+            cls._strips.append(strip)
+
+    @classmethod
+    def unregister(cls, strip):
+        if strip in cls._strips:
+            cls._strips.remove(strip)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QtCore.QEvent.Wheel:
+            # Check every registered strip
+            for strip in list(self._strips):
+                try:
+                    # globalPos → is cursor inside the strip's scroll area?
+                    gp = event.globalPos()
+                    scroll = strip._scroll
+                    local = scroll.mapFromGlobal(gp)
+                    if scroll.rect().contains(local):
+                        strip._handle_wheel(event)
+                        event.accept()
+                        return True          # consumed – Nuke won't see it
+                except Exception:
+                    pass
+        return False
+
+
 class _ThumbCard(QtWidgets.QFrame):
     """Single thumbnail card: image + filename label.
     A centered '✕' remove button appears only on mouse hover."""
@@ -567,17 +617,23 @@ class _ThumbCard(QtWidgets.QFrame):
         self.setFixedSize(64, 64)
         self.setStyleSheet("QFrame { background: #333; border-radius: 4px; }")
 
+        # Use a layout so that sizeHint works correctly inside QScrollArea
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setAlignment(QtCore.Qt.AlignCenter)
+
         # -- thumbnail --
-        self._thumb = QtWidgets.QLabel(self)
+        self._thumb = QtWidgets.QLabel()
         pix = QtGui.QPixmap(img_path)
+        print("[NB ImageStrip] _ThumbCard loading: {} | pixmap null={}".format(img_path, pix.isNull()))
         if not pix.isNull():
             pix = pix.scaled(60, 60, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
             self._thumb.setPixmap(pix)
         self._thumb.setFixedSize(60, 60)
         self._thumb.setAlignment(QtCore.Qt.AlignCenter)
-        self._thumb.move(2, 2)
+        layout.addWidget(self._thumb)
 
-        # -- remove button (centered over thumbnail, hidden by default) --
+        # -- remove button (overlay, centered over thumbnail, hidden by default) --
         self._remove_btn = QtWidgets.QPushButton("✕", self)
         self._remove_btn.setFixedSize(22, 22)
         self._remove_btn.setStyleSheet(
@@ -585,9 +641,9 @@ class _ThumbCard(QtWidgets.QFrame):
             "border-radius: 11px; font-size: 11px; font-weight: bold; }"
             "QPushButton:hover { background: rgba(220,38,38,240); }"
         )
-        # Center the button over the thumbnail area (thumb is 60x60 at (2,2))
-        btn_x = 2 + (60 - 22) // 2  # = 21
-        btn_y = 2 + (60 - 22) // 2  # = 21
+        # Center the button over the card
+        btn_x = (64 - 22) // 2
+        btn_y = (64 - 22) // 2
         self._remove_btn.move(btn_x, btn_y)
         self._remove_btn.hide()
         self._remove_btn.clicked.connect(lambda: self.removeClicked.emit(self._img_path))
@@ -600,27 +656,175 @@ class _ThumbCard(QtWidgets.QFrame):
         self._remove_btn.hide()
         super(_ThumbCard, self).leaveEvent(event)
 
+    def wheelEvent(self, event):
+        """Forward wheel events to the parent ImageStrip so scrolling
+        works even when the cursor is directly on a thumbnail."""
+        strip = self.parent()
+        # Walk up to find the ImageStrip (parent chain: card -> _inner -> viewport -> scroll -> ImageStrip)
+        while strip is not None and not isinstance(strip, ImageStrip):
+            strip = strip.parent() if hasattr(strip, 'parent') and callable(strip.parent) else None
+        if strip is not None:
+            strip._handle_wheel(event)
+            event.accept()
+        else:
+            super(_ThumbCard, self).wheelEvent(event)
+
 
 class ImageStrip(QtWidgets.QWidget):
-    """Shows thumbnails of attached images with a '+' add-local-file button
-    always at the end.  When more than _MAX_VISIBLE thumbnails exist, the
-    extras are shown as a compact 'img3, img4 ...' label to save space."""
+    """Shows thumbnails of attached images inside a horizontally scrollable
+    area, with a '+' add-local-file button always pinned at the right end."""
 
     imagesChanged = QtCore.Signal()
-    _MAX_VISIBLE = 3  # show full thumbnails for up to this many
 
     def __init__(self, add_callback=None, parent=None):
         super(ImageStrip, self).__init__(parent)
         self._images = []  # list of file paths
         self._add_callback = add_callback  # called when "+" is clicked
 
-        self._layout = QtWidgets.QHBoxLayout(self)
+        # Outer layout: scroll area (takes remaining space) + pinned "+" button
+        outer = QtWidgets.QHBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(4)
+
+        # --- Scroll area for thumbnails ---
+        self._scroll = QtWidgets.QScrollArea()
+        self._scroll.setWidgetResizable(False)  # inner widget keeps its own width
+        self._scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self._scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self._scroll.setFixedHeight(72)
+        self._scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+        )
+
+        # Inner container widget + layout for the thumbnail cards
+        self._inner = QtWidgets.QWidget()
+        self._inner.setStyleSheet("background: transparent;")
+        self._layout = QtWidgets.QHBoxLayout(self._inner)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(4)
         self._layout.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        self._scroll.setWidget(self._inner)
 
-        # Build initial state (just the "+" button)
+        outer.addWidget(self._scroll, 1)
+
+        # --- Pinned "+" button always visible at the right ---
+        self._add_btn = QtWidgets.QPushButton("+")
+        self._add_btn.setFixedSize(40, 40)
+        self._add_btn.setToolTip("Add local file (images & documents)")
+        self._add_btn.setStyleSheet(
+            "QPushButton { background: #333; color: #e74c3c; border: 2px solid #555; "
+            "border-radius: 6px; font-size: 22px; font-weight: bold; }"
+            "QPushButton:hover { background: #444; border-color: #e74c3c; }"
+        )
+        if self._add_callback:
+            self._add_btn.clicked.connect(self._add_callback)
+        outer.addWidget(self._add_btn, alignment=QtCore.Qt.AlignVCenter)
+
+        # Enable mouse-wheel horizontal scrolling
+        self._scroll.installEventFilter(self)
+        self._scroll.viewport().installEventFilter(self)
+        self._inner.installEventFilter(self)
+        self._mid_drag = False       # middle-button drag state
+        self._mid_drag_start_x = 0   # mouse X at drag start
+        self._mid_drag_start_val = 0  # scrollbar value at drag start
+
+        # Register with the app-level wheel grabber so scrolling works
+        # even when Nuke intercepts wheel events at a higher level.
+        _ImageStripWheelGrabber.register(self)
+
+        # Build initial state
         self._rebuild()
+
+    def _is_scroll_child(self, obj):
+        """Return True if *obj* belongs to the scroll area hierarchy."""
+        if obj is self._scroll or obj is self._scroll.viewport() or obj is self._inner:
+            return True
+        # Walk up the parent chain to see if it's a child of _inner
+        w = obj
+        while w is not None:
+            if w is self._inner:
+                return True
+            w = w.parent() if hasattr(w, 'parent') and callable(w.parent) else None
+        return False
+
+    def hideEvent(self, event):
+        """Unregister from global wheel grabber when hidden/closed."""
+        _ImageStripWheelGrabber.unregister(self)
+        super(ImageStrip, self).hideEvent(event)
+
+    def showEvent(self, event):
+        """Re-register when shown again."""
+        _ImageStripWheelGrabber.register(self)
+        super(ImageStrip, self).showEvent(event)
+
+    # -- event filter: wheel scroll + middle-button drag --
+    def eventFilter(self, obj, event):
+        etype = event.type()
+        viewport = self._scroll.viewport()
+
+        # DEBUG: log mouse events on scroll children
+        _debug_types = {QtCore.QEvent.Wheel, QtCore.QEvent.MouseButtonPress,
+                        QtCore.QEvent.MouseButtonRelease}
+        if etype in _debug_types and self._is_scroll_child(obj):
+            print("[NB ImageStrip] eventFilter: type={} obj={} btn={}".format(
+                etype, type(obj).__name__,
+                event.button() if hasattr(event, 'button') else 'N/A'))
+
+        # ---- Mouse wheel → horizontal scroll ----
+        if etype == QtCore.QEvent.Wheel and self._is_scroll_child(obj):
+            delta = event.angleDelta().y()
+            if delta == 0:
+                delta = event.angleDelta().x()
+            sb = self._scroll.horizontalScrollBar()
+            old_val = sb.value()
+            sb.setValue(old_val - delta)
+            print("[NB ImageStrip] wheel: delta={} sb={}->{}/{}  obj={}".format(
+                delta, old_val, sb.value(), sb.maximum(), type(obj).__name__))
+            return True
+
+        # ---- Middle-button press → start drag ----
+        if etype == QtCore.QEvent.MouseButtonPress and self._is_scroll_child(obj):
+            if event.button() == QtCore.Qt.MiddleButton:
+                self._mid_drag = True
+                self._mid_drag_start_x = event.globalX()
+                self._mid_drag_start_val = self._scroll.horizontalScrollBar().value()
+                viewport.setCursor(QtCore.Qt.ClosedHandCursor)
+                print("[NB ImageStrip] mid-drag start at x={}".format(self._mid_drag_start_x))
+                return True
+
+        # ---- Middle-button move → drag scroll ----
+        if etype == QtCore.QEvent.MouseMove and self._mid_drag:
+            dx = event.globalX() - self._mid_drag_start_x
+            sb = self._scroll.horizontalScrollBar()
+            sb.setValue(self._mid_drag_start_val - dx)
+            return True
+
+        # ---- Middle-button release → end drag ----
+        if etype == QtCore.QEvent.MouseButtonRelease and self._mid_drag:
+            if event.button() == QtCore.Qt.MiddleButton:
+                self._mid_drag = False
+                viewport.setCursor(QtCore.Qt.ArrowCursor)
+                print("[NB ImageStrip] mid-drag end")
+                return True
+
+        return super(ImageStrip, self).eventFilter(obj, event)
+
+    # -- direct wheel handler (called from eventFilter and child wheelEvent) --
+    def _handle_wheel(self, event):
+        """Scroll the image strip horizontally in response to a wheel event."""
+        delta = event.angleDelta().y()
+        if delta == 0:
+            delta = event.angleDelta().x()
+        sb = self._scroll.horizontalScrollBar()
+        old_val = sb.value()
+        sb.setValue(old_val - delta)
+        print("[NB ImageStrip] wheel: delta={} sb={}->{}/{}".format(
+            delta, old_val, sb.value(), sb.maximum()))
+
+    def wheelEvent(self, event):
+        """Catch wheel events that reach the ImageStrip widget itself."""
+        self._handle_wheel(event)
+        event.accept()
 
     @property
     def images(self):
@@ -629,8 +833,11 @@ class ImageStrip(QtWidgets.QWidget):
     def add_image(self, path):
         if path and os.path.isfile(path) and path not in self._images:
             self._images.append(path)
+            print("[NB ImageStrip] add_image: {} | total={}".format(path, len(self._images)))
             self._rebuild()
             self.imagesChanged.emit()
+        else:
+            print("[NB ImageStrip] add_image skipped: path={} exists={}".format(path, os.path.isfile(path) if path else False))
 
     def clear_images(self):
         self._images.clear()
@@ -638,6 +845,8 @@ class ImageStrip(QtWidgets.QWidget):
         self.imagesChanged.emit()
 
     def _rebuild(self):
+        print("[NB ImageStrip] _rebuild: {} images".format(len(self._images)))
+
         # Clear layout
         while self._layout.count():
             item = self._layout.takeAt(0)
@@ -645,68 +854,31 @@ class ImageStrip(QtWidgets.QWidget):
             if w:
                 w.deleteLater()
 
-        # Show full thumbnails up to _MAX_VISIBLE
-        visible = self._images[:self._MAX_VISIBLE]
-        overflow = self._images[self._MAX_VISIBLE:]
-
-        for idx, img_path in enumerate(visible):
+        # Add all thumbnail cards (no overflow label needed — scroll handles it)
+        for idx, img_path in enumerate(self._images):
             card = _ThumbCard(img_path)
             card.removeClicked.connect(self._remove)
+            # Install eventFilter so middle-drag / wheel works even when
+            # the cursor is directly over a thumbnail card.
+            card.installEventFilter(self)
+            card._thumb.installEventFilter(self)
             self._layout.addWidget(card)
 
-        # If there are overflow images, show a compact label like "img4, img5 ..."
-        if overflow:
-            overflow_names = []
-            for i, p in enumerate(overflow):
-                overflow_names.append("img{}".format(self._MAX_VISIBLE + i + 1))
-            overflow_text = ", ".join(overflow_names)
-            if len(overflow_text) > 30:
-                overflow_text = overflow_text[:28] + "..."
+        # Manually calculate the inner widget width so QScrollArea can scroll
+        # Each card is 64px wide, spacing is 4px between cards
+        n = len(self._images)
+        if n > 0:
+            inner_w = n * 64 + (n - 1) * 4  # cards + spacing between them
+        else:
+            inner_w = 0
+        print("[NB ImageStrip] _rebuild: calculated inner_w={} for {} cards".format(inner_w, n))
+        self._inner.setFixedSize(inner_w, 72)
 
-            overflow_frame = QtWidgets.QFrame()
-            overflow_frame.setStyleSheet("QFrame { background: #2a2a2a; border-radius: 4px; }")
-            ofl = QtWidgets.QVBoxLayout(overflow_frame)
-            ofl.setContentsMargins(6, 4, 6, 4)
-            ofl.setSpacing(2)
+        # Scroll to the rightmost position so newest images are visible
+        QtCore.QTimer.singleShot(0, lambda: self._scroll.horizontalScrollBar().setValue(
+            self._scroll.horizontalScrollBar().maximum()))
 
-            count_lbl = QtWidgets.QLabel("+{} more".format(len(overflow)))
-            count_lbl.setStyleSheet("color: #4f87f7; font-size: 11px; font-weight: bold; background: transparent;")
-            count_lbl.setAlignment(QtCore.Qt.AlignCenter)
-            ofl.addWidget(count_lbl)
-
-            names_lbl = QtWidgets.QLabel(overflow_text)
-            names_lbl.setStyleSheet("color: #888; font-size: 9px; background: transparent;")
-            names_lbl.setAlignment(QtCore.Qt.AlignCenter)
-            names_lbl.setWordWrap(True)
-            ofl.addWidget(names_lbl)
-
-            # Clear-all button for overflow
-            clear_btn = QtWidgets.QPushButton("Clear all")
-            clear_btn.setFixedHeight(18)
-            clear_btn.setStyleSheet(
-                "QPushButton { background: #555; color: #ccc; border: none; "
-                "border-radius: 4px; font-size: 9px; padding: 2px 6px; }"
-                "QPushButton:hover { background: #ef4444; color: white; }"
-            )
-            clear_btn.clicked.connect(self.clear_images)
-            ofl.addWidget(clear_btn, alignment=QtCore.Qt.AlignCenter)
-
-            self._layout.addWidget(overflow_frame)
-
-        # Always show the "+" button at the end of the image row
-        add_btn = QtWidgets.QPushButton("+")
-        add_btn.setFixedSize(40, 40)
-        add_btn.setToolTip("Add local file (images & documents)")
-        add_btn.setStyleSheet(
-            "QPushButton { background: #333; color: #e74c3c; border: 2px solid #555; "
-            "border-radius: 6px; font-size: 22px; font-weight: bold; }"
-            "QPushButton:hover { background: #444; border-color: #e74c3c; }"
-        )
-        if self._add_callback:
-            add_btn.clicked.connect(self._add_callback)
-        self._layout.addWidget(add_btn, alignment=QtCore.Qt.AlignVCenter)
-
-        # Set height: show the strip always (for the + button), taller when images exist
+        # Set overall strip height
         self.setFixedHeight(72 if self._images else 48)
 
     def _remove(self, path):
