@@ -2035,8 +2035,29 @@ class VeoWidget(QtWidgets.QWidget):
         # Capture references for closures so they don't depend on self
         widget_ref = self
 
+        # --- Register task in global status bar progress manager ---
+        try:
+            from ai_workflow.status_bar import task_progress_manager
+            status_task_id = task_progress_manager.add_task(
+                node.name() if node else "VEO", "video")
+            worker.status_update.connect(
+                lambda s: task_progress_manager.update_status(status_task_id, s))
+            worker.progress_update.connect(
+                lambda v: task_progress_manager.update_status(status_task_id, progress=v))
+        except Exception:
+            status_task_id = None
+
         def _on_finished(path, metadata):
             """Called when generation finishes. Works even if widget is destroyed."""
+            # Update global status bar
+            if status_task_id:
+                try:
+                    from ai_workflow.status_bar import task_progress_manager as _tpm
+                    _tpm.complete_task(status_task_id, "Done! Video: {}".format(
+                        os.path.basename(path) if path else ""))
+                except Exception:
+                    pass
+
             try:
                 _alive = _isValid(widget_ref)
                 if _alive:
@@ -2084,6 +2105,14 @@ class VeoWidget(QtWidgets.QWidget):
 
         def _on_error(err):
             """Called on generation error. Works even if widget is destroyed."""
+            # Update global status bar
+            if status_task_id:
+                try:
+                    from ai_workflow.status_bar import task_progress_manager as _tpm
+                    _tpm.error_task(status_task_id, str(err)[:80])
+                except Exception:
+                    pass
+
             try:
                 _alive = _isValid(widget_ref)
                 if _alive:
@@ -2567,7 +2596,28 @@ class VeoRecordWidget(QtWidgets.QWidget):
         widget_ref = self
         node_ref = self.node
 
+        # --- Register task in global status bar progress manager ---
+        try:
+            from ai_workflow.status_bar import task_progress_manager
+            status_task_id = task_progress_manager.add_task(
+                node_ref.name() if node_ref else "VEO Regen", "video")
+            worker.status_update.connect(
+                lambda s: task_progress_manager.update_status(status_task_id, s))
+            worker.progress_update.connect(
+                lambda v: task_progress_manager.update_status(status_task_id, progress=v))
+        except Exception:
+            status_task_id = None
+
         def _on_finished(path, metadata):
+            # Update global status bar
+            if status_task_id:
+                try:
+                    from ai_workflow.status_bar import task_progress_manager as _tpm
+                    _tpm.complete_task(status_task_id, "Done! Video: {}".format(
+                        os.path.basename(path) if path else ""))
+                except Exception:
+                    pass
+
             try:
                 _alive = _isValid(widget_ref)
                 if _alive:
@@ -2595,6 +2645,14 @@ class VeoRecordWidget(QtWidgets.QWidget):
                 _veo_active_workers.pop(worker_id, None)
 
         def _on_error(err):
+            # Update global status bar
+            if status_task_id:
+                try:
+                    from ai_workflow.status_bar import task_progress_manager as _tpm
+                    _tpm.error_task(status_task_id, str(err)[:80])
+                except Exception:
+                    pass
+
             try:
                 _alive = _isValid(widget_ref)
                 if _alive:
