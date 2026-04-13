@@ -141,6 +141,16 @@ class _TaskProgressWidget(QtWidgets.QWidget):
         # Remove task after 8 seconds
         QtCore.QTimer.singleShot(8000, lambda: self._remove_task(task_id))
 
+    def cancel_task(self, task_id, message="Cancelled"):
+        """Mark a task as cancelled and auto-hide after a short delay."""
+        if task_id not in self._tasks:
+            return
+        self._tasks[task_id]["status"] = message
+        self._tasks[task_id]["progress"] = 0
+        self._refresh_display()
+        # Remove task after 3 seconds
+        QtCore.QTimer.singleShot(3000, lambda: self._remove_task(task_id))
+
     def _remove_task(self, task_id):
         """Remove a task and hide if no tasks remain."""
         self._tasks.pop(task_id, None)
@@ -323,6 +333,13 @@ class TaskProgressManager(object):
         def _do():
             if self._widget:
                 self._widget.error_task(task_id, error_msg)
+        nuke.executeInMainThread(_do)
+
+    def cancel_task(self, task_id, message="Cancelled"):
+        """Thread-safe task cancellation."""
+        def _do():
+            if self._widget:
+                self._widget.cancel_task(task_id, message)
         nuke.executeInMainThread(_do)
 
 

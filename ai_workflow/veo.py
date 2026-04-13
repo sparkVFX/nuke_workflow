@@ -332,15 +332,14 @@ class VeoWorker(QtCore.QThread):
             # Build config and generate_kwargs based on mode
             has_refs = len(ref_images) > 0
 
-            # Force 8s per API requirement:
-            #   - Ingredients mode (reference_images) -> must be 8s
-            #   - Resolution 1080p/4k + Ingredients mode -> must be 8s
-            #   - Frames / FirstFrame mode: user can freely choose 4/6/8s
-            if has_refs and self.mode not in ("Frames", "FirstFrame"):
+            # Force 8s per Google Veo 3.1 API constraints:
+            #   - Frames (first+last frame) mode: ALWAYS 8s (any resolution)
+            #   - 1080p / 4k resolution: ALWAYS 8s (any mode)
+            #   - Text / FirstFrame / Ingredients @ 720p: user can choose 4/6/8s
+            if self.mode == "Frames":
                 dur_seconds = 8
             if self.resolution and self.resolution.lower() in ("1080p", "4k"):
-                if self.mode not in ("Frames", "FirstFrame"):
-                    dur_seconds = 8
+                dur_seconds = 8
 
             config_kwargs["duration_seconds"] = dur_seconds
 
@@ -1496,6 +1495,7 @@ class VeoWidget(QtWidgets.QWidget):
         res_group.addWidget(res_label)
         self.res_combo = DropDownComboBox()
         self.res_combo.addItems(["720P", "1080P"])
+        self.res_combo.currentIndexChanged.connect(lambda _: self._update_duration_for_mode())
         self.res_combo.currentIndexChanged.connect(lambda _: self._save_all_state_to_node())
         res_group.addWidget(self.res_combo)
         config_row.addLayout(res_group, 1)
@@ -1609,9 +1609,26 @@ class VeoWidget(QtWidgets.QWidget):
         self._update_node_inputs(mode)
         self._update_duration_for_mode(mode)
 
-    def _update_duration_for_mode(self, mode):
-        """Lock duration to 8s for Frames / Ingredients modes (API requirement)."""
-        if mode in (VEO_MODE_FRAMES, VEO_MODE_INGREDIENTS):
+    def _update_duration_for_mode(self, mode=None):
+        """Update duration combo based on current mode + resolution.
+
+        API constraints (Google Veo 3.1 official docs):
+          - Frames (first+last frame) mode: always 8s only (any resolution)
+          - 1080p / 4k resolution: always 8s only (any mode)
+          - Otherwise (Text/FirstFrame/Ingredients @ 720p): 4s, 6s, 8s
+        """
+        if mode is None:
+            mode = self.mode_combo.currentData() or VEO_MODE_TEXT
+        resolution = self.res_combo.currentText().lower()
+
+        # Determine if duration must be locked to 8s
+        must_lock_8s = False
+        if mode == VEO_MODE_FRAMES:
+            must_lock_8s = True  # Frames mode always requires 8s
+        if resolution in ("1080p", "4k"):
+            must_lock_8s = True  # 1080p/4k always requires 8s
+
+        if must_lock_8s:
             self.dur_combo.blockSignals(True)
             self.dur_combo.setCurrentIndex(2)   # index 2 = "8"
             self.dur_combo.blockSignals(False)
@@ -1932,8 +1949,45 @@ class VeoWidget(QtWidgets.QWidget):
             return
 
         if self.current_worker and self.current_worker.is_running:
-            self.current_worker.stop()
-            self.status_label.setText("Stopped")
+            worker = self.current_worker
+            worker.stop()
+            # Disconnect all signals to prevent callbacks into dead/stale objects
+            try:
+                worker.finished.disconnect()
+                worker.error.disconnect()
+                worker.status_update.disconnect()
+                worker.progress_update.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            # Cancel the status bar progress task
+            if hasattr(self, '_status_task_id') and self._status_task_id:
+                try:
+                    from ai_workflow.status_bar import task_progress_manager
+                    task_progress_manager.cancel_task(
+                        self._status_task_id, "Cancelled by user")
+                except Exception:
+                    pass
+                self._status_task_id = None
+            # IMPORTANT: The QThread must stay alive (prevent GC) until its
+            # OS thread exits, otherwise Qt crashes.  Keep it in the global
+            # registry and poll with a QTimer until isRunning() returns False.
+            worker_id = id(worker)
+            _cleanup_timer = QtCore.QTimer()
+            _cleanup_timer.setInterval(500)  # check every 500ms
+            def _poll_thread_exit():
+                if not worker.isRunning():
+                    _cleanup_timer.stop()
+                    _veo_active_workers.pop(worker_id, None)
+            _cleanup_timer.timeout.connect(_poll_thread_exit)
+            _cleanup_timer.start()
+            # Store timer ref in registry to prevent it from being GC'd
+            _veo_active_workers.setdefault(worker_id, {})["_cleanup_timer"] = _cleanup_timer
+            self.current_worker = None
+            # Reset UI
+            self.pbar.setVisible(False)
+            self.pbar.setValue(0)
+            self.status_label.setStyleSheet("color: #facc15; font-size: 11px;")
+            self.status_label.setText("Generation cancelled")
             self._toggle_stop_ui(False)
             return
 
@@ -2042,12 +2096,14 @@ class VeoWidget(QtWidgets.QWidget):
             from ai_workflow.status_bar import task_progress_manager
             status_task_id = task_progress_manager.add_task(
                 node.name() if node else "VEO", "video")
+            self._status_task_id = status_task_id  # Save for stop/cancel access
             worker.status_update.connect(
                 lambda s: task_progress_manager.update_status(status_task_id, s))
             worker.progress_update.connect(
                 lambda v: task_progress_manager.update_status(status_task_id, progress=v))
         except Exception:
             status_task_id = None
+            self._status_task_id = None
 
         def _on_finished(path, metadata):
             """Called when generation finishes. Works even if widget is destroyed."""
@@ -2446,6 +2502,7 @@ class VeoRecordWidget(QtWidgets.QWidget):
         res_group.addWidget(res_lbl)
         self.res_combo = DropDownComboBox()
         self.res_combo.addItems(["720P", "1080P"])
+        self.res_combo.currentIndexChanged.connect(lambda _: self._update_duration_constraints())
         res_group.addWidget(self.res_combo)
         config_row.addLayout(res_group, 1)
 
@@ -2477,6 +2534,7 @@ class VeoRecordWidget(QtWidgets.QWidget):
         self.mode_combo.addItem("Frames", VEO_MODE_FRAMES)
         self.mode_combo.addItem("Ingredients", VEO_MODE_INGREDIENTS)
         self.mode_combo.setCurrentIndex(1)  # Default to FirstFrame
+        self.mode_combo.currentIndexChanged.connect(lambda _: self._update_duration_constraints())
         mode_row.addWidget(self.mode_combo, 1)
         mode_row.addStretch()
         main.addLayout(mode_row)
@@ -2616,6 +2674,9 @@ class VeoRecordWidget(QtWidgets.QWidget):
             if "veo_neg_prompt" in self.node.knobs():
                 self.neg_prompt_edit.setText(self.node["veo_neg_prompt"].value())
 
+            # Apply duration constraints based on loaded mode + resolution
+            self._update_duration_constraints()
+
             # Load reference images into the ImageStrip (mirrors NanoBanana)
             try:
                 print("[VEO Regen] >>> Loading input images from knob...")
@@ -2670,6 +2731,31 @@ class VeoRecordWidget(QtWidgets.QWidget):
         json_val = json.dumps(paths)
         self.node["veo_input_images"].setValue(json_val)
 
+    def _update_duration_constraints(self):
+        """Update duration combo based on current mode + resolution.
+
+        API constraints (Google Veo 3.1 official docs):
+          - Frames (first+last frame) mode: always 8s only (any resolution)
+          - 1080p / 4k resolution: always 8s only (any mode)
+          - Otherwise (Text/FirstFrame/Ingredients @ 720p): 4s, 6s, 8s
+        """
+        mode = self.mode_combo.currentData() or VEO_MODE_TEXT
+        resolution = self.res_combo.currentText().lower()
+
+        must_lock_8s = False
+        if mode == VEO_MODE_FRAMES:
+            must_lock_8s = True
+        if resolution in ("1080p", "4k"):
+            must_lock_8s = True
+
+        if must_lock_8s:
+            self.dur_combo.blockSignals(True)
+            self.dur_combo.setCurrentIndex(2)   # index 2 = "8"
+            self.dur_combo.blockSignals(False)
+            self.dur_combo.setEnabled(False)
+        else:
+            self.dur_combo.setEnabled(True)
+
     def _regenerate(self):
         """Regenerate video using editable parameters and cached reference images."""
         if not self.settings.api_key:
@@ -2679,8 +2765,44 @@ class VeoRecordWidget(QtWidgets.QWidget):
             return
 
         if self.current_worker and self.current_worker.is_running:
-            self.current_worker.stop()
-            self.status_label.setText("Stopped")
+            worker = self.current_worker
+            worker.stop()
+            # Disconnect all signals to prevent callbacks into dead/stale objects
+            try:
+                worker.finished.disconnect()
+                worker.error.disconnect()
+                worker.status_update.disconnect()
+                worker.progress_update.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            # Cancel the status bar progress task
+            if hasattr(self, '_status_task_id') and self._status_task_id:
+                try:
+                    from ai_workflow.status_bar import task_progress_manager
+                    task_progress_manager.cancel_task(
+                        self._status_task_id, "Cancelled by user")
+                except Exception:
+                    pass
+                self._status_task_id = None
+            # IMPORTANT: The QThread must stay alive (prevent GC) until its
+            # OS thread exits, otherwise Qt crashes.  Keep it in the global
+            # registry and poll with a QTimer until isRunning() returns False.
+            worker_id = id(worker)
+            _cleanup_timer = QtCore.QTimer()
+            _cleanup_timer.setInterval(500)
+            def _poll_thread_exit():
+                if not worker.isRunning():
+                    _cleanup_timer.stop()
+                    _veo_active_workers.pop(worker_id, None)
+            _cleanup_timer.timeout.connect(_poll_thread_exit)
+            _cleanup_timer.start()
+            _veo_active_workers.setdefault(worker_id, {})["_cleanup_timer"] = _cleanup_timer
+            self.current_worker = None
+            # Reset UI
+            self.pbar.setVisible(False)
+            self.pbar.setValue(0)
+            self.status_label.setStyleSheet("color: #facc15; font-size: 11px;")
+            self.status_label.setText("Generation cancelled")
             self._toggle_ui(False)
             return
 
@@ -2746,12 +2868,14 @@ class VeoRecordWidget(QtWidgets.QWidget):
             from ai_workflow.status_bar import task_progress_manager
             status_task_id = task_progress_manager.add_task(
                 node_ref.name() if node_ref else "VEO Regen", "video")
+            self._status_task_id = status_task_id  # Save for stop/cancel access
             worker.status_update.connect(
                 lambda s: task_progress_manager.update_status(status_task_id, s))
             worker.progress_update.connect(
                 lambda v: task_progress_manager.update_status(status_task_id, progress=v))
         except Exception:
             status_task_id = None
+            self._status_task_id = None
 
         def _on_finished(path, metadata):
             # Update global status bar
