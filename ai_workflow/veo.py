@@ -2331,9 +2331,15 @@ class VeoRecordWidget(QtWidgets.QWidget):
 
         # === Editable Negative Prompt ===
         self.neg_prompt_edit = QtWidgets.QTextEdit()
-        self.neg_prompt_edit.setPlaceholderText("Negative Prompt (Optional)...")
-        self.neg_prompt_edit.setMinimumHeight(80)
+        self.neg_prompt_edit.setPlaceholderText("Negative prompt (optional)...")
+        self.neg_prompt_edit.setFixedHeight(70)
         main.addWidget(self.neg_prompt_edit)
+
+        # === Image Reference Strip (add / remove reference images) ===
+        from ai_workflow.gemini_chat import ImageStrip
+        self._ref_image_strip = ImageStrip(add_callback=self._add_ref_image)
+        self._ref_image_strip.imagesChanged.connect(self._save_ref_images_to_node)
+        main.addWidget(self._ref_image_strip)
 
         # === Regenerate Button ===
         self.regen_btn = QtWidgets.QPushButton("REGENERATE VIDEO")
@@ -2453,8 +2459,39 @@ class VeoRecordWidget(QtWidgets.QWidget):
             if "veo_neg_prompt" in self.node.knobs():
                 self.neg_prompt_edit.setText(self.node["veo_neg_prompt"].value())
 
+            # Load cached reference images into the ImageStrip
+            if "veo_input_images" in self.node.knobs():
+                try:
+                    data = json.loads(self.node["veo_input_images"].value())
+                    ref_list = data.get("reference_images", [])
+                    for img_path in ref_list:
+                        if img_path and os.path.exists(img_path):
+                            self._ref_image_strip.add_image(img_path)
+                except Exception:
+                    pass
+
         except Exception as e:
             print("VEO: Error loading record settings: {}".format(e))
+
+    # ----- Image reference strip callbacks -----
+
+    def _add_ref_image(self):
+        """Called when the '+' button on the ImageStrip is clicked."""
+        fpath, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Add Reference Image", "",
+            "Images (*.png *.jpg *.jpeg *.gif *.webp);;All Files (*)"
+        )
+        if fpath and os.path.isfile(fpath):
+            self._ref_image_strip.add_image(fpath)
+            self._save_ref_images_to_node()
+
+    def _save_ref_images_to_node(self):
+        """Persist the current ImageStrip paths back to the node's veo_input_images knob."""
+        if not self.node or "veo_input_images" not in self.node.knobs():
+            return
+        paths = self._ref_image_strip.images if hasattr(self, '_ref_image_strip') else []
+        json_val = json.dumps({"reference_images": paths})
+        self.node["veo_input_images"].setValue(json_val)
 
     def _regenerate(self):
         """Regenerate video using editable parameters and cached reference images."""
@@ -2483,9 +2520,14 @@ class VeoRecordWidget(QtWidgets.QWidget):
         resolution = self.res_combo.currentText()
         current_mode = self.mode_combo.currentData() or VEO_MODE_TEXT
 
-        # Collect cached reference images from node
+        # Collect reference images from the ImageStrip (UI source of truth)
         reference_image_paths = []
-        if "veo_input_images" in self.node.knobs():
+        if hasattr(self, '_ref_image_strip'):
+            reference_image_paths = [p for p in self._ref_image_strip.images
+                                     if p and os.path.exists(p)]
+            # Sync strip state back to the node knob
+            self._save_ref_images_to_node()
+        elif "veo_input_images" in self.node.knobs():
             try:
                 data = json.loads(self.node["veo_input_images"].value())
                 ref_list = data.get("reference_images", [])
