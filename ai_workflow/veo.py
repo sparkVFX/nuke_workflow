@@ -1279,11 +1279,11 @@ class VeoWidget(QtWidgets.QWidget):
         return self.mode_combo.currentData() or VEO_MODE_TEXT
 
     def _update_node_inputs(self, mode):
-        """Dynamically update the VEO_Generate node's internal Input count
-        and rename the Input nodes according to mode:
-          FirstFrame:   A1 -> FirstFrame
-          Frames:       A1 -> FirstFrame, A2 -> EndFrame
-          Ingredients:  A1 -> img1, A2 -> img2, A3 -> img3
+        """Dynamically update the VEO node's internal Input count using
+        the NanoBanana pattern (delete all + rebuild in reverse order).
+
+        Layout: FirstFrame/img1(LEFT) -> ... -> EndFrame/imgN(RIGHT)
+        Mapping: names[K] = node.input(count - 1 - K)
         """
         node = self._get_owner_node()
         if not node:
@@ -1291,7 +1291,6 @@ class VeoWidget(QtWidgets.QWidget):
 
         needed = VEO_MODE_INPUT_COUNTS.get(mode, 0)
 
-        # Name mapping per mode
         _INPUT_NAMES = {
             VEO_MODE_TEXT: [],
             VEO_MODE_FIRST_FRAME: ["FirstFrame"],
@@ -1304,40 +1303,77 @@ class VeoWidget(QtWidgets.QWidget):
         node.begin()
         existing_inputs = [n for n in nuke.allNodes("Input")]
         current_count = len(existing_inputs)
+        print("[VEO DEBUG] _update_node_inputs: mode={} needed={} current={}".format(
+            mode, needed, current_count))
 
-        if current_count < needed:
-            # Add missing inputs
-            for i in range(current_count, needed):
+        if needed != current_count and needed > 0:
+            # Save existing connections: old port i -> connected node?
+            # Old mapping was: names[K] = input(current_count - 1 - K)
+            saved = {}
+            if current_count > 0:
+                old_names = sorted(existing_inputs, key=lambda n: int(n["xpos"].value()))
+                for k, inp_node in enumerate(old_names):
+                    old_port = current_count - 1 - k
+                    conn = node.input(old_port) if 0 <= old_port < current_count else None
+                    if conn is not None:
+                        # Store by logical name so we can remap to new ports
+                        saved[inp_node.name()] = conn
+                        print("[VEO DEBUG]   save: '{}' <- '{}'".
+                              format(inp_node.name(), conn.name()))
+
+            # Delete all existing Input nodes
+            del_names = [n.name() for n in existing_inputs]
+            for inp in list(nuke.allNodes("Input")):
+                nuke.delete(inp)
+            print("[VEO DEBUG]   delete: {}".format(del_names))
+
+            # Recreate using reverse order + number knob (NanoBanana pattern)
+            for i in range(needed, 0, -1):
                 inp = nuke.nodes.Input()
-                label = names[i] if i < len(names) else "A{}".format(i + 1)
+                label = names[i - 1]
                 inp.setName(label)
-                inp["xpos"].setValue(i * 200)
+                inp["number"].setValue(needed - i)
+                inp["xpos"].setValue((i - 1) * 200)
                 inp["ypos"].setValue(0)
-        elif current_count > needed:
-            # Remove extra inputs (remove from highest index)
-            existing_inputs.sort(key=lambda n: n.name(), reverse=True)
-            for i in range(current_count - needed):
-                nuke.delete(existing_inputs[i])
+                print("[VEO DEBUG]   create: '{}' num={} #{}"
+                      .format(label, needed - i, needed - i + 1))
+            node.end()
 
-        # Rename remaining inputs to match the current mode.
-        # Sort by xpos (layout order) to get a stable index order.
-        remaining_inputs = sorted(
-            [n for n in nuke.allNodes("Input")],
-            key=lambda n: int(n["xpos"].value())
-        )
-        # First pass: give temporary names to avoid collision
-        for i, inp_node in enumerate(remaining_inputs):
-            try:
-                inp_node.setName("_veo_tmp_{}".format(i))
-            except Exception:
-                pass
-        # Second pass: assign final names
-        for i, inp_node in enumerate(remaining_inputs):
-            if i < len(names):
-                try:
-                    inp_node.setName(names[i])
-                except Exception:
-                    pass
+            # Restore connections using new mapping: names[K] = input(needed - 1 - K)
+            set_indices = set()
+            for k, label in enumerate(names):
+                if label in saved:
+                    new_port = needed - 1 - k
+                    group_ref = self._get_owner_node()
+                    if group_ref:
+                        group_ref.setInput(new_port, saved[label])
+                        set_indices.add(new_port)
+                        print("[VEO DEBUG]   restore: {} <- input {} ('{}')"
+                              .format(label, new_port, saved[label].name()))
+
+            # Clear auto-filled indices (Nuke setInput fills 0..N-1)
+            for i in range(needed):
+                if i not in set_indices:
+                    group_ref = self._get_owner_node()
+                    if group_ref:
+                        group_ref.setInput(i, None)
+
+            print("[VEO DEBUG]   AFTER ({} inputs):".format(needed))
+            group_ref = self._get_owner_node()
+            if group_ref:
+                for idx in range(needed):
+                    c = group_ref.input(idx)
+                    print("[VEO DEBUG]     input({}) <- {}".format(
+                        idx, c.name() if c else "None"))
+            return
+
+        elif needed == 0 and current_count > 0:
+            # Text mode: remove all inputs
+            for inp in list(nuke.allNodes("Input")):
+                nuke.delete(inp)
+            print("[VEO DEBUG]   removed all inputs (Text mode)")
+            node.end()
+            return
 
         node.end()
 
@@ -1582,20 +1618,36 @@ class VeoWidget(QtWidgets.QWidget):
 
         reference_image_paths = []
         input_count = VEO_MODE_INPUT_COUNTS.get(current_mode, 0)
-        for idx in range(input_count):
-            inp_ref = node.input(idx)
+
+        # NanoBanana mapping: names[K] = node.input(input_count - 1 - K)
+        # names[0]=FirstFrame/img1 = leftmost = highest port index
+        _INPUT_NAMES = {
+            VEO_MODE_TEXT: [],
+            VEO_MODE_FIRST_FRAME: ["FirstFrame"],
+            VEO_MODE_FRAMES: ["FirstFrame", "EndFrame"],
+            VEO_MODE_INGREDIENTS: ["img1", "img2", "img3"],
+        }
+        names = _INPUT_NAMES.get(current_mode, [])
+
+        for k in range(input_count):
+            port_idx = input_count - 1 - k
+            label = names[k] if k < len(names) else "input{}".format(k + 1)
+            inp_ref = node.input(port_idx)
+            print("[VEO DEBUG] _on_generate: {} <- input({}) -> node '{}'".format(
+                label, port_idx, inp_ref.name() if inp_ref else "None"))
             if inp_ref:
-                ref_label = "input{}".format(idx + 1)
-                # Render from current timeline frame, but name files as frame1/frame2/frame3
-                frame_idx = idx + 1
-                path = os.path.join(input_dir, "{}_{}_frame{}.png".format(gen_name, ref_label, frame_idx))
+                frame_idx = k + 1
+                path = os.path.join(input_dir, "{}_{}_frame{}.png".format(
+                    gen_name, label.replace("/", "_"), frame_idx))
                 if render_input_to_file_silent(inp_ref, path, nuke.frame()):
                     reference_image_paths.append(path)
                 else:
-                    nuke.message("Error: Failed to render input A{}.".format(idx + 1))
-                    self.status_label.setText("Error: A{} render failed".format(idx + 1))
+                    nuke.message("Error: Failed to render {}.".format(label))
+                    self.status_label.setText("Error: {} render failed".format(label))
                     self._toggle_stop_ui(False)
                     return
+
+        print("[VEO DEBUG] reference_image_paths order: {}".format(reference_image_paths))
 
         model_name = self.model_combo.currentText()
         ratio = self.ratio_combo.currentText()
@@ -2218,6 +2270,50 @@ def _next_veo_name():
     return "veo{}".format(i)
 
 
+def _create_veo_group_inputs(group_node, input_names):
+    """Create Input nodes inside a VEO Group using NanoBanana's proven pattern.
+
+    Pattern: REVERSE creation order + 'number' knob
+    - Nuke: first-created Input = RIGHTmost on the DAG input strip.
+    - We CREATE in REVERSE: rightmost name first -> leftmost last.
+    - 'number' knob: higher value = more LEFT. Leftmost gets highest number.
+    - Connection mapping: names[K] = node.input(count - 1 - K)
+
+    Examples:
+      Frames mode ["FirstFrame", "EndFrame"] (count=2):
+        Created 1st: EndFrame   number=0  input(0)  RIGHT
+        Created 2nd: FirstFrame number=1  input(1)  LEFT
+
+      Ingredients mode ["img1", "img2", "img3"] (count=3):
+        Created 1st: img3  number=0  input(0)  RIGHT
+        Created 2nd: img2  number=1  input(1)
+        Created 3rd: img1  number=2  input(2)  LEFT
+    """
+    count = len(input_names)
+    group_node.begin()
+    for i in range(count, 0, -1):
+        inp = nuke.nodes.Input()
+        label = input_names[i - 1]
+        inp.setName(label)
+        # number knob: leftmost = highest number
+        inp["number"].setValue(count - i)
+        # xpos: leftmost at 0, rightmost at (count-1)*200
+        inp["xpos"].setValue((i - 1) * 200)
+        inp["ypos"].setValue(0)
+        print("[VEO DEBUG] _create_veo_inputs: '{}' num={} created_#{}"
+              .format(inp.name(), count - i, count - i + 1))
+
+    out = nuke.nodes.Output()
+    out["xpos"].setValue(0)
+    out["ypos"].setValue(200)
+    group_node.end()
+
+    # Debug verify
+    for idx in range(count):
+        print("[VEO DEBUG] _create_veo_inputs: verify input({}) -> {}"
+              .format(idx, group_node.input(idx).name() if group_node.input(idx) else "None"))
+
+
 def create_veo_node():
     """
     Create a VEO node.
@@ -2288,26 +2384,17 @@ def create_veo_node():
         group_node["xpos"].setValue(x)
         group_node["ypos"].setValue(y)
 
-    # Build internal structure
-    group_node.begin()
+    # Build internal structure using NanoBanana pattern (reverse creation + number knob)
+    _create_veo_group_inputs(group_node, input_names[:needed_inputs])
 
-    # Create Input nodes based on mode
-    for i in range(needed_inputs):
-        inp = nuke.nodes.Input()
-        label = input_names[i] if i < len(input_names) else "A{}".format(i + 1)
-        inp.setName(label)
-        inp["xpos"].setValue(i * 200)
-        inp["ypos"].setValue(0)
-
-    out = nuke.nodes.Output()
-    out["xpos"].setValue(0)
-    out["ypos"].setValue(200)
-
-    group_node.end()
-
-    # Connect selected nodes as inputs (first selected -> input 0 = FirstFrame, etc.)
-    for i, node in enumerate(input_nodes[:needed_inputs]):
-        group_node.setInput(i, node)
+    # Connect selected nodes using NanoBanana mapping:
+    #   input_names[K] = node.input(needed_inputs - 1 - K)
+    #   input_nodes[0] -> leftmost port (FirstFrame / img1)
+    for k, src_node in enumerate(input_nodes[:needed_inputs]):
+        port_idx = needed_inputs - 1 - k
+        print("[VEO DEBUG] setInput(port={}, node='{}') for '{}'"
+              .format(port_idx, src_node.name(), input_names[k]))
+        group_node.setInput(port_idx, src_node)
 
     # Add custom VEO tab
     tab = nuke.Tab_Knob("veo_tab", "VEO")
@@ -2329,10 +2416,10 @@ def create_veo_node():
 
     # Log mode selection
     mode_display = {
-        VEO_MODE_TEXT: "Text（文本）",
-        VEO_MODE_FIRST_FRAME: "FirstFrame（首帧）",
-        VEO_MODE_FRAMES: "Frames（首尾帧）",
-        VEO_MODE_INGREDIENTS: "Ingredients（多图参考）",
+        VEO_MODE_TEXT: "Text",
+        VEO_MODE_FIRST_FRAME: "FirstFrame",
+        VEO_MODE_FRAMES: "Frames",
+        VEO_MODE_INGREDIENTS: "Ingredients",
     }
     print("VEO: Created '{}' with auto-detected mode: {} (selected {} nodes)".format(
         group_node.name(), mode_display.get(auto_mode, auto_mode), node_count))

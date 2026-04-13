@@ -3213,7 +3213,7 @@ def _nanobanana_input_changed():
         return
 
     node = nuke.thisNode()
-    if not node.name().startswith("NanoBanana_Generate"):
+    if not _is_generator_node(node):
         return
     if node.Class() != "Group":
         return
