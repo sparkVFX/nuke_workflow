@@ -1069,19 +1069,35 @@ def create_veo_viewer_node(generator_node, prompt, aspect_ratio, duration,
             file_knob.setValue(output_video_path.replace("\\", "/"))
         group.addKnob(file_knob)
 
-        # --- format (Enumeration_Knob — survives rename-undo) ---
+        # --- format (dropdown, like native Read) ---
+        # Format_Knob has no enumValues; use nuke.formats() to build dropdown.
+        fmt_values = []
         try:
-            _fmt_list = list(nuke.formats())
-            fmt_values = [str(f) for f in _fmt_list]
-            fmt_current = str(read_node["format"].value()) if "format" in read_node.knobs() else ""
-            if fmt_current and fmt_current not in fmt_values:
-                fmt_values.append(fmt_current)
-            format_knob = nuke.Enumeration_Knob("veo_format", "format", " ".join(fmt_values))
-            format_knob.setValue(fmt_current)
-            group.addKnob(format_knob)
-            _read_sync_knobs.append(("veo_format", "format"))
+            for _f in nuke.formats():
+                _fn = _f.name()
+                if _fn:
+                    fmt_values.append(_fn)
         except Exception:
             pass
+        if not fmt_values:
+            fmt_values = ["---"]
+        fmt_current = "---"
+        try:
+            _fv = read_node["format"].value()
+            if hasattr(_fv, 'width') and _fv.width() > 0:
+                fmt_current = '%dx%d' % (_fv.width(), _fv.height())
+            elif hasattr(_fv, 'name') and _fv.name():
+                fmt_current = _fv.name()
+            else:
+                fmt_current = str(_fv)
+        except Exception:
+            pass
+        if fmt_current and fmt_current not in fmt_values:
+            fmt_values.append(fmt_current)
+        format_knob = nuke.Enumeration_Knob("veo_format", "format", fmt_values)
+        format_knob.setValue(fmt_current)
+        group.addKnob(format_knob)
+        _read_sync_knobs.append(("veo_format", "format"))
 
         # --- frame range knobs (Int_Knob) ---
         if "first" in read_node.knobs():
@@ -1153,16 +1169,31 @@ def create_veo_viewer_node(generator_node, prompt, aspect_ratio, duration,
             except Exception:
                 pass
 
-        # --- colorspace (Enumeration_Knob) ---
+        # --- colorspace / Input Transform (Enumeration_Knob) ---
+        # In OCIO mode the label is "Input Transform"; we use the Read's own label.
         if "colorspace" in read_node.knobs():
+            cs_label = read_node["colorspace"].label() or "colorspace"
+            cs_values = []
             try:
-                csk = nuke.Enumeration_Knob("veo_colorspace", read_node["colorspace"].label() or "colorspace", read_node["colorspace"].enums())
-                csk.setValue(read_node["colorspace"].value())
-                csk.setFlag(nuke.STARTLINE)
-                group.addKnob(csk)
-                _read_sync_knobs.append(("veo_colorspace", "colorspace"))
+                _cs_k = read_node["colorspace"]
+                if hasattr(_cs_k, "values") and callable(_cs_k.values):
+                    cs_values = list(_cs_k.values()) or []
+                elif hasattr(_cs_k, "enumerationItems") and callable(_cs_k.enumerationItems):
+                    cs_values = list(_cs_k.enumerationItems()) or []
             except Exception:
                 pass
+            if not cs_values:
+                cs_values = ["default", "linear", "sRGB", "Gamma1.8", "Gamma2.2",
+                             "Rec709", "ACEScg", "ALEXAV3LogC"]
+            current_cs = str(read_node["colorspace"].value())
+            if current_cs not in cs_values:
+                cs_values.insert(0, current_cs)
+            csk = nuke.Enumeration_Knob("veo_colorspace", cs_label, cs_values)
+            csk.setValue(current_cs)
+            csk.setFlag(nuke.STARTLINE)
+            group.addKnob(csk)
+            _read_sync_knobs.append(("veo_colorspace", "colorspace"))
+
         for _kname in ["premultiplied", "raw", "auto_alpha"]:
             if _kname in read_node.knobs():
                 try:
@@ -1430,19 +1461,35 @@ def create_veo_viewer_standalone(xpos=None, ypos=None):
         file_knob = nuke.File_Knob("veo_file", "file")
         group.addKnob(file_knob)
 
-        # --- format (Enumeration_Knob — survives rename-undo) ---
+        # --- format (dropdown, like native Read) ---
+        # Format_Knob has no enumValues; use nuke.formats() to build dropdown.
+        fmt_values = []
         try:
-            _fmt_list = list(nuke.formats())
-            fmt_values = [str(f) for f in _fmt_list]
-            fmt_current = str(read_node["format"].value()) if "format" in read_node.knobs() else ""
-            if fmt_current and fmt_current not in fmt_values:
-                fmt_values.append(fmt_current)
-            format_knob = nuke.Enumeration_Knob("veo_format", "format", " ".join(fmt_values))
-            format_knob.setValue(fmt_current)
-            group.addKnob(format_knob)
-            _read_sync_knobs.append(("veo_format", "format"))
+            for _f in nuke.formats():
+                _fn = _f.name()
+                if _fn:
+                    fmt_values.append(_fn)
         except Exception:
             pass
+        if not fmt_values:
+            fmt_values = ["---"]
+        fmt_current = "---"
+        try:
+            _fv = read_node["format"].value()
+            if hasattr(_fv, 'width') and _fv.width() > 0:
+                fmt_current = '%dx%d' % (_fv.width(), _fv.height())
+            elif hasattr(_fv, 'name') and _fv.name():
+                fmt_current = _fv.name()
+            else:
+                fmt_current = str(_fv)
+        except Exception:
+            pass
+        if fmt_current and fmt_current not in fmt_values:
+            fmt_values.append(fmt_current)
+        format_knob = nuke.Enumeration_Knob("veo_format", "format", fmt_values)
+        format_knob.setValue(fmt_current)
+        group.addKnob(format_knob)
+        _read_sync_knobs.append(("veo_format", "format"))
 
         # --- frame range knobs (Int_Knob) ---
         if "first" in read_node.knobs():
@@ -1514,16 +1561,31 @@ def create_veo_viewer_standalone(xpos=None, ypos=None):
             except Exception:
                 pass
 
-        # --- colorspace (Enumeration_Knob) ---
+        # --- colorspace / Input Transform (Enumeration_Knob) ---
+        # In OCIO mode the label is "Input Transform"; we use the Read's own label.
         if "colorspace" in read_node.knobs():
+            cs_label = read_node["colorspace"].label() or "colorspace"
+            cs_values = []
             try:
-                csk = nuke.Enumeration_Knob("veo_colorspace", read_node["colorspace"].label() or "colorspace", read_node["colorspace"].enums())
-                csk.setValue(read_node["colorspace"].value())
-                csk.setFlag(nuke.STARTLINE)
-                group.addKnob(csk)
-                _read_sync_knobs.append(("veo_colorspace", "colorspace"))
+                _cs_k = read_node["colorspace"]
+                if hasattr(_cs_k, "values") and callable(_cs_k.values):
+                    cs_values = list(_cs_k.values()) or []
+                elif hasattr(_cs_k, "enumerationItems") and callable(_cs_k.enumerationItems):
+                    cs_values = list(_cs_k.enumerationItems()) or []
             except Exception:
                 pass
+            if not cs_values:
+                cs_values = ["default", "linear", "sRGB", "Gamma1.8", "Gamma2.2",
+                             "Rec709", "ACEScg", "ALEXAV3LogC"]
+            current_cs = str(read_node["colorspace"].value())
+            if current_cs not in cs_values:
+                cs_values.insert(0, current_cs)
+            csk = nuke.Enumeration_Knob("veo_colorspace", cs_label, cs_values)
+            csk.setValue(current_cs)
+            csk.setFlag(nuke.STARTLINE)
+            group.addKnob(csk)
+            _read_sync_knobs.append(("veo_colorspace", "colorspace"))
+
         for _kname in ["premultiplied", "raw", "auto_alpha"]:
             if _kname in read_node.knobs():
                 try:
