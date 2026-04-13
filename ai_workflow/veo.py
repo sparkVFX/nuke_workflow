@@ -605,9 +605,10 @@ else:
 def create_veo_player_node(video_path=None, name=None, xpos=None, ypos=None):
     """Create a VEO Player Group node that wraps a Read node.
 
-    The Group exposes all Read-tab knobs via Link_Knobs so the user sees
-    exactly the same parameters as a native Read node, plus a Send to Studio
-    button at the bottom.
+    The Group exposes all Read-tab knobs using REAL knobs (NOT Link_Knob)
+    so they survive rename-undo (Ctrl+Z).  A knobChanged callback keeps
+    them synced with the internal Read node via name-based lookup
+    (nuke.toNode('InternalRead')).
 
     Args:
         video_path: Optional path to a video file to load.
@@ -617,230 +618,330 @@ def create_veo_player_node(video_path=None, name=None, xpos=None, ypos=None):
     Returns:
         (group_node, internal_read_node) tuple.
     """
-    # --- Create the Group shell ---
-    group = nuke.nodes.Group()
-    if name:
-        group.setName(name)
-    else:
-        group.setName("VEO_Player1")
-    group["tile_color"].setValue(0x00C878FF)  # Green tint
-    group["label"].setValue("VEO Player")
+    # Wrap entire node creation as a single undo unit so that
+    # subsequent rename-undo cannot partially break internal structure
+    nuke.Undo.begin("Create VEO Viewer")
+    try:
+        # --- Create the Group shell ---
+        _default_name = _next_veo_name()
+        group = nuke.nodes.Group(name=(name or _default_name))
+        group["tile_color"].setValue(0x00C878FF)  # Green tint
+        group["label"].setValue("VEO Player")
 
-    if xpos is not None:
-        group["xpos"].setValue(int(xpos))
-    if ypos is not None:
-        group["ypos"].setValue(int(ypos))
+        if xpos is not None:
+            group["xpos"].setValue(int(xpos))
+        if ypos is not None:
+            group["ypos"].setValue(int(ypos))
 
-    # --- Build internals: Read → Output ---
-    group.begin()
-    read_node = nuke.nodes.Read(name="InternalRead")
-    out_node = nuke.nodes.Output(name="Output")
-    out_node.setInput(0, read_node)
-    group.end()
-
-    # Load the video file AFTER group.end() so knobs are fully populated
-    if video_path and os.path.exists(video_path):
+        # --- Build internals: Read → Output ---
         group.begin()
-        read_node["file"].fromUserText(video_path)
+        read_node = nuke.nodes.Read(name="InternalRead")
+        out_node = nuke.nodes.Output(name="Output")
+        out_node.setInput(0, read_node)
         group.end()
 
-    # --- Expose Read-tab knobs on the Group panel ---
-    # Instead of Link_Knob (which doesn't render UI for many knob types),
-    # we add a custom "Open Read Properties" button and a direct knob callback
-    # approach.  The simplest reliable method in Nuke is to use the Group's
-    # built-in "publish" mechanism via TCL, but since that is fragile across
-    # versions we use a pragmatic approach: expose the most important knobs
-    # as real knobs with TCL expression links, and for MOV options use a
-    # dedicated callback.
+        # Load the video file AFTER group.end() so knobs are fully populated
+        if video_path and os.path.exists(video_path):
+            group.begin()
+            read_node["file"].fromUserText(video_path)
+            group.end()
 
-    # Tab: Read
-    tab_read = nuke.Tab_Knob("read_tab", "Read")
-    group.addKnob(tab_read)
+        # --- Expose Read-tab knobs on the Group panel ---
+        # Use REAL knobs (NOT Link_Knob) so they survive rename-undo.
+        # Link_Knob stores hardcoded TCL paths like "NodeName.InternalRead.format"
+        # which break after undo-rename. Real knobs store actual values,
+        # and a knobChanged callback keeps them synced via name lookup.
 
-    # Helper: get full TCL path for internal read knob
-    read_full = read_node.fullName()
+        # Tab: Read
+        tab_read = nuke.Tab_Knob("read_tab", "Read")
+        group.addKnob(tab_read)
 
-    # --- file knob (special: File_Knob) ---
-    file_knob = nuke.File_Knob("veo_file", "file")
-    if video_path:
-        file_knob.setValue(video_path.replace("\\", "/"))
-    group.addKnob(file_knob)
+        # Track which knobs need syncing between Group panel <-> internal Read
+        _read_sync_knobs = []
 
-    # --- format ---
-    try:
-        link_format = nuke.Link_Knob("format")
-        link_format.makeLink(read_full, "format")
-        link_format.setLabel("format")
-        group.addKnob(link_format)
-    except Exception:
-        pass
+        # --- file knob (special: File_Knob) ---
+        file_knob = nuke.File_Knob("veo_file", "file")
+        if video_path:
+            file_knob.setValue(video_path.replace("\\", "/"))
+        group.addKnob(file_knob)
 
-    # --- frame range knobs ---
-    # first and last on the same line
-    if "first" in read_node.knobs():
+        # --- format (dropdown, like native Read) ---
+        fmt_values = []
         try:
-            link = nuke.Link_Knob("first")
-            link.makeLink(read_full, "first")
-            link.setLabel("first")
-            link.setFlag(nuke.STARTLINE)
-            group.addKnob(link)
+            for _f in nuke.formats():
+                _fn = _f.name()
+                if _fn:
+                    fmt_values.append(_fn)
         except Exception:
             pass
-    if "last" in read_node.knobs():
+        if not fmt_values:
+            fmt_values = ["---"]
+        fmt_current = "---"
         try:
-            link = nuke.Link_Knob("last")
-            link.makeLink(read_full, "last")
-            link.setLabel("last")
-            link.clearFlag(nuke.STARTLINE)
-            group.addKnob(link)
+            _fv = read_node["format"].value()
+            if hasattr(_fv, 'width') and _fv.width() > 0:
+                fmt_current = '%dx%d' % (_fv.width(), _fv.height())
+            elif hasattr(_fv, 'name') and _fv.name():
+                fmt_current = _fv.name()
+            else:
+                fmt_current = str(_fv)
         except Exception:
             pass
+        if fmt_current and fmt_current not in fmt_values:
+            fmt_values.append(fmt_current)
+        format_knob = nuke.Enumeration_Knob("veo_format", "format", fmt_values)
+        format_knob.setValue(fmt_current)
+        group.addKnob(format_knob)
+        _read_sync_knobs.append(("veo_format", "format"))
 
-    # frame_mode and frame on the same line
-    if "frame_mode" in read_node.knobs():
-        try:
-            link = nuke.Link_Knob("frame_mode")
-            link.makeLink(read_full, "frame_mode")
-            link.setLabel("frame mode")
-            link.setFlag(nuke.STARTLINE)
-            group.addKnob(link)
-        except Exception:
-            pass
-    if "frame" in read_node.knobs():
-        try:
-            link = nuke.Link_Knob("frame")
-            link.makeLink(read_full, "frame")
-            link.setLabel("frame")
-            link.clearFlag(nuke.STARTLINE)
-            group.addKnob(link)
-        except Exception:
-            pass
+        # --- frame range knobs: first, last ---
+        if "first" in read_node.knobs():
+            k = nuke.Int_Knob("veo_first", "first")
+            k.setFlag(nuke.STARTLINE)
+            k.setValue(int(read_node["first"].value()))
+            group.addKnob(k)
+            _read_sync_knobs.append(("veo_first", "first"))
+        if "last" in read_node.knobs():
+            k = nuke.Int_Knob("veo_last", "last")
+            k.clearFlag(nuke.STARTLINE)
+            k.setValue(int(read_node["last"].value()))
+            group.addKnob(k)
+            _read_sync_knobs.append(("veo_last", "last"))
 
-    # origfirst and origlast on the same line
-    if "origfirst" in read_node.knobs():
-        try:
-            link = nuke.Link_Knob("origfirst")
-            link.makeLink(read_full, "origfirst")
-            link.setLabel("origfirst")
-            link.setFlag(nuke.STARTLINE)
-            group.addKnob(link)
-        except Exception:
-            pass
-    if "origlast" in read_node.knobs():
-        try:
-            link = nuke.Link_Knob("origlast")
-            link.makeLink(read_full, "origlast")
-            link.setLabel("origlast")
-            link.clearFlag(nuke.STARTLINE)
-            group.addKnob(link)
-        except Exception:
-            pass
+        # --- frame_mode and frame ---
+        if "frame_mode" in read_node.knobs():
+            k = nuke.Enumeration_Knob("veo_frame_mode", "frame mode",
+                                      list(read_node["frame_mode"].values()) or [""])
+            k.setFlag(nuke.STARTLINE)
+            k.setValue(str(read_node["frame_mode"].value()))
+            group.addKnob(k)
+            _read_sync_knobs.append(("veo_frame_mode", "frame_mode"))
+        if "frame" in read_node.knobs():
+            k = nuke.Int_Knob("veo_frame", "frame")
+            k.clearFlag(nuke.STARTLINE)
+            k.setValue(int(read_node["frame"].value()))
+            group.addKnob(k)
+            _read_sync_knobs.append(("veo_frame", "frame"))
 
-    # --- on_error ---
-    if "on_error" in read_node.knobs():
-        try:
-            link = nuke.Link_Knob("on_error")
-            link.makeLink(read_full, "on_error")
-            link.setLabel("missing frames")
-            link.setFlag(nuke.STARTLINE)
-            group.addKnob(link)
-        except Exception:
-            pass
+        # --- origfirst, origlast ---
+        if "origfirst" in read_node.knobs():
+            k = nuke.Int_Knob("veo_origfirst", "origfirst")
+            k.setFlag(nuke.STARTLINE)
+            k.setValue(int(read_node["origfirst"].value()))
+            group.addKnob(k)
+            _read_sync_knobs.append(("veo_origfirst", "origfirst"))
+        if "origlast" in read_node.knobs():
+            k = nuke.Int_Knob("veo_origlast", "origlast")
+            k.clearFlag(nuke.STARTLINE)
+            k.setValue(int(read_node["origlast"].value()))
+            group.addKnob(k)
+            _read_sync_knobs.append(("veo_origlast", "origlast"))
 
-    # --- colorspace (Input Transform), premultiplied, raw, auto_alpha on the same line ---
-    if "colorspace" in read_node.knobs():
-        try:
-            link = nuke.Link_Knob("colorspace")
-            link.makeLink(read_full, "colorspace")
-            link.setLabel(read_node["colorspace"].label() or "colorspace")
-            link.setFlag(nuke.STARTLINE)
-            group.addKnob(link)
-        except Exception:
-            pass
-    for kname in ["premultiplied", "raw", "auto_alpha"]:
-        if kname in read_node.knobs():
+        # --- on_error ---
+        if "on_error" in read_node.knobs():
+            k = nuke.Enumeration_Knob("veo_on_error", "missing frames",
+                                      list(read_node["on_error"].values()) or [""])
+            k.setFlag(nuke.STARTLINE)
+            k.setValue(str(read_node["on_error"].value()))
+            group.addKnob(k)
+            _read_sync_knobs.append(("veo_on_error", "on_error"))
+
+        # --- colorspace (dropdown from Read's own enum values) ---
+        if "colorspace" in read_node.knobs():
+            cs_label = read_node["colorspace"].label() or "colorspace"
+            cs_values = []
             try:
-                link = nuke.Link_Knob(kname)
-                link.makeLink(read_full, kname)
-                link.setLabel(read_node[kname].label() or kname)
-                link.clearFlag(nuke.STARTLINE)
-                group.addKnob(link)
+                _cs_k = read_node["colorspace"]
+                if hasattr(_cs_k, "values") and callable(_cs_k.values):
+                    cs_values = list(_cs_k.values()) or []
+                elif hasattr(_cs_k, "enumerationItems") and callable(_cs_k.enumerationItems):
+                    cs_values = list(_cs_k.enumerationItems()) or []
+            except Exception:
+                pass
+            if not cs_values:
+                cs_values = ["default", "linear", "sRGB", "Gamma1.8", "Gamma2.2",
+                             "Rec709", "ACEScg", "ALEXAV3LogC"]
+            current_cs = str(read_node["colorspace"].value())
+            if current_cs not in cs_values:
+                cs_values.insert(0, current_cs)
+            cs_knob = nuke.Enumeration_Knob("veo_colorspace", cs_label, cs_values)
+            cs_knob.setFlag(nuke.STARTLINE)
+            cs_knob.setValue(current_cs)
+            group.addKnob(cs_knob)
+            _read_sync_knobs.append(("veo_colorspace", "colorspace"))
+
+        # --- premultiplied, raw, auto_alpha ---
+        for rk in ["premultiplied", "raw", "auto_alpha"]:
+            if rk in read_node.knobs():
+                rl = read_node[rk].label() or rk
+                real_k = nuke.Boolean_Knob("veo_" + rk, rl)
+                real_k.setValue(int(read_node[rk].value()))
+                real_k.clearFlag(nuke.STARTLINE)
+                group.addKnob(real_k)
+                _read_sync_knobs.append(("veo_" + rk, rk))
+
+        # --- MOV Options section ---
+        mov_knob_names = [
+            "ycbcr_matrix", "mov_data_range",
+            "first_track_only", "metadata", "noprefix", "match_key_format",
+            "mov64_decode_codec", "mov_decode_codec",
+            "video_codec_knob",
+        ]
+        mov_divider_added = False
+        for mk in mov_knob_names:
+            if mk in read_node.knobs():
+                if not mov_divider_added:
+                    mov_div = nuke.Text_Knob("mov_divider", "MOV Options")
+                    group.addKnob(mov_div)
+                    mov_divider_added = True
+                ml = read_node[mk].label() or mk
+                mk_val = read_node[mk].value()
+                if isinstance(mk_val, int):
+                    real_mov_k = nuke.Boolean_Knob("veo_" + mk, ml)
+                    real_mov_k.setValue(int(mk_val))
+                elif isinstance(mk_val, str) and len(mk_val) < 256:
+                    real_mov_k = nuke.String_Knob("veo_" + mk, ml)
+                    real_mov_k.setValue(str(mk_val))
+                else:
+                    continue  # skip unsupported types
+                group.addKnob(real_mov_k)
+                _read_sync_knobs.append(("veo_" + mk, mk))
+
+        # If MOV loaded, show video codec as text display
+        if mov_divider_added:
+            try:
+                codec_val = ""
+                if "video_codec_knob" in read_node.knobs():
+                    codec_val = read_node["video_codec_knob"].value()
+                elif "mov64_decode_codec" in read_node.knobs():
+                    codec_val = read_node["mov64_decode_codec"].value()
+                if codec_val:
+                    codec_text = nuke.Text_Knob("video_codec_display", "Video Codec", str(codec_val))
+                    group.addKnob(codec_text)
             except Exception:
                 pass
 
-    # --- MOV Options section ---
-    # These knobs are dynamically added by Nuke when a MOV file is loaded.
-    mov_knob_names = [
-        "ycbcr_matrix", "mov_data_range",
-        "first_track_only", "metadata", "noprefix", "match_key_format",
-        "mov64_decode_codec", "mov_decode_codec",
-        "video_codec_knob",
-    ]
+        # --- Button to open internal Read node's full properties ---
+        open_read_script = (
+            "n = nuke.thisNode()\n"
+            "n.begin()\n"
+            "r = nuke.toNode('InternalRead')\n"
+            "n.end()\n"
+            "if r:\n"
+            "    nuke.show(r)\n"
+        )
+        open_btn = nuke.PyScript_Knob("open_read_props", "Open Full Read Properties", open_read_script)
+        open_btn.setFlag(nuke.STARTLINE)
+        group.addKnob(open_btn)
 
-    mov_divider_added = False
-    for kname in mov_knob_names:
-        if kname in read_node.knobs():
-            if not mov_divider_added:
-                mov_div = nuke.Text_Knob("mov_divider", "MOV Options")
-                group.addKnob(mov_div)
-                mov_divider_added = True
+        # --- knobChanged callback: sync ALL exposed knobs <-> internal Read ---
+        # Uses name-based lookup (nuke.toNode('InternalRead')) so it survives
+        # rename-undo.  When any exposed knob changes, push its value into
+        # the corresponding internal Read knob.  For veo_file (file), also
+        # pull fresh colorspace/format values back after loading.
+        _sync_pairs_str = repr(_read_sync_knobs).replace("'", '"')
+        kc_script = (
+            "import nuke\n"
+            "n = nuke.thisNode()\n"
+            "k = nuke.thisKnob()\n"
+            "kn = k.name()\n"
+            "# ===== DEBUG: knobChanged fired =====\n"
+            "_dbg = '[VEO-DEBUG] knobChanged: node=%s knob=%s value=%s' % (n.name(), kn, str(k.value())[:80])\n"
+            "print(_dbg)\n"
+            "n.begin()\n"
+            "r = nuke.toNode('InternalRead')\n"
+            "n.end()\n"
+            "_dbg2 = '[VEO-DEBUG] InternalRead found=%s' % (r is not None)\n"
+            "print(_dbg2)\n"
+            "if not r:\n"
+            "    print('[VEO-DEBUG] WARNING: InternalRead NOT FOUND! All internal nodes:')\n"
+            "    n.begin()\n"
+            "    for _dn in nuke.allNodes():\n"
+            "        print('  [VEO-DEBUG]   internal: %s (%s)' % (_dn.name(), _dn.Class()))\n"
+            "    n.end()\n"
+            "    pass\n"
+            "# File changed: load into Read + pull fresh values\n"
+            "if kn == 'veo_file' and r:\n"
+            "    n.begin()\n"
+            "    r['file'].fromUserText(k.value())\n"
+            "    n.end()\n"
+            "    # Pull fresh colorspace from Read\n"
+            "    try:\n"
+            "        _cv = str(r['colorspace'].value())\n"
+            "        n['veo_colorspace'].setValue(_cv)\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "    # Force postage stamp refresh\n"
+            "    if 'postage_stamp' in n.knobs():\n"
+            "        n['postage_stamp'].setValue(True)\n"
+            "    try:\n"
+            "        n.sample('red', 0, 0)\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "# Sync Group -> Read for all other exposed knobs\n"
+            "_pairs = " + _sync_pairs_str + "\n"
+            "for _gk, _rk in _pairs:\n"
+            "    if kn == _gk and r and _rk in r.knobs():\n"
+            "        try:\n"
+            "            if _rk == 'format':\n"
+            "                n.begin()\n"
+            "                r['format'].setValue(k.value())\n"
+            "                n.end()\n"
+            "            elif isinstance(r[_rk].value(), int):\n"
+            "                n.begin()\n"
+            "                r[_rk].setValue(int(k.value()))\n"
+            "                n.end()\n"
+            "            else:\n"
+            "                n.begin()\n"
+            "                r[_rk].setValue(k.value())\n"
+            "                n.end()\n"
+            "            print('[VEO-DEBUG] Synced %s -> %s = %s' % (_gk, _rk, str(k.value())[:60]))\n"
+            "        except Exception as _e:\n"
+            "            print('[VEO-DEBUG] SYNC ERROR %s->%s: %s' % (_gk, _rk, _e))\n"
+            "print('[VEO-DEBUG] knobChanged done for %s' % kn)\n"
+        )
+        group["knobChanged"].setValue(kc_script)
+
+        # --- Divider + Send to Studio button ---
+        divider = nuke.Text_Knob("studio_divider", "")
+        group.addKnob(divider)
+
+        btn = nuke.PyScript_Knob("send_to_studio", "Send to Studio", _VEO_PLAYER_SEND_SCRIPT)
+        btn.setFlag(nuke.STARTLINE)
+        group.addKnob(btn)
+
+        # Hidden marker knob so we can identify VEO Player nodes later
+        marker = nuke.Boolean_Knob("is_veo_player", "")
+        marker.setValue(True)
+        marker.setFlag(nuke.INVISIBLE)
+        group.addKnob(marker)
+
+        print("VEO: Created VEO Player '{}' with internal Read".format(group.name()))
+        # DEBUG: dump all knobs on the group
+        print("[VEO-DEBUG] Group knobs after creation:")
+        for _gk in group.knobs():
             try:
-                link = nuke.Link_Knob(kname)
-                link.makeLink(read_full, kname)
-                link.setLabel(read_node[kname].label() or kname)
-                group.addKnob(link)
+                _gv = str(group[_gk].value())[:60]
             except Exception:
-                pass
+                _gv = "(no value)"
+            print("  [VEO-DEBUG]   %s = %s (type=%s)" % (_gk, _gv, group[_gk].Class()))
+        # DEBUG: verify InternalRead is accessible by name
+        group.begin()
+        _dr = nuke.toNode('InternalRead')
+        group.end()
+        print("[VEO-DEBUG] InternalRead accessible immediately after creation: %s" % (_dr is not None))
+        if _dr:
+            for _rk in ['file', 'format', 'first', 'last', 'colorspace']:
+                if _rk in _dr.knobs():
+                    try:
+                        print("  [VEO-DEBUG]   Read.%s = %s" % (_rk, str(_dr[_rk].value())[:60]))
+                    except Exception:
+                        pass
 
-    # If MOV was loaded, also show the video codec as a text display
-    if mov_divider_added:
-        try:
-            codec_val = ""
-            if "video_codec_knob" in read_node.knobs():
-                codec_val = read_node["video_codec_knob"].value()
-            elif "mov64_decode_codec" in read_node.knobs():
-                codec_val = read_node["mov64_decode_codec"].value()
-            if codec_val:
-                codec_text = nuke.Text_Knob("video_codec_display", "Video Codec", str(codec_val))
-                group.addKnob(codec_text)
-        except Exception:
-            pass
+        return group, read_node
 
-    # --- Button to open internal Read node's full properties ---
-    open_read_script = "n = nuke.thisNode()\nn.begin()\nr = nuke.toNode('InternalRead')\nn.end()\nif r: nuke.show(r)"
-    open_btn = nuke.PyScript_Knob("open_read_props", "Open Full Read Properties", open_read_script)
-    open_btn.setFlag(nuke.STARTLINE)
-    group.addKnob(open_btn)
-
-    # --- knobChanged callback to sync veo_file → internal Read's file ---
-    kc_script = (
-        "n = nuke.thisNode()\n"
-        "k = nuke.thisKnob()\n"
-        "if k.name() == 'veo_file':\n"
-        "    n.begin()\n"
-        "    r = nuke.toNode('InternalRead')\n"
-        "    n.end()\n"
-        "    if r:\n"
-        "        r['file'].fromUserText(k.value())\n"
-    )
-    group["knobChanged"].setValue(kc_script)
-
-    # --- Divider + Send to Studio button ---
-    divider = nuke.Text_Knob("studio_divider", "")
-    group.addKnob(divider)
-
-    btn = nuke.PyScript_Knob("send_to_studio", "Send to Studio", _VEO_PLAYER_SEND_SCRIPT)
-    btn.setFlag(nuke.STARTLINE)
-    group.addKnob(btn)
-
-    # Hidden marker knob so we can identify VEO Player nodes later
-    marker = nuke.Boolean_Knob("is_veo_player", "")
-    marker.setValue(True)
-    marker.setFlag(nuke.INVISIBLE)
-    group.addKnob(marker)
-
-    print("VEO: Created VEO Player '{}' with internal Read".format(group.name()))
-    return group, read_node
+    finally:
+        nuke.Undo.end()
 
 
 def _get_internal_read(player_group):
@@ -955,12 +1056,12 @@ def create_veo_viewer_node(generator_node, prompt, aspect_ratio, duration,
         group.setInput(0, dot_node)
 
         # ==============================================================
-        # Tab 1: Read  (expose Read-node knobs, like create_veo_player_node did)
+        # Tab 1: Read  (REAL knobs — NOT Link_Knob — survive rename-undo)
         # ==============================================================
-        read_full = read_node.fullName()
-
         tab_read = nuke.Tab_Knob("read_tab", "Read")
         group.addKnob(tab_read)
+
+        _read_sync_knobs = []  # (group_knob_name, internal_read_knob_name)
 
         # --- file knob ---
         file_knob = nuke.File_Knob("veo_file", "file")
@@ -968,124 +1069,143 @@ def create_veo_viewer_node(generator_node, prompt, aspect_ratio, duration,
             file_knob.setValue(output_video_path.replace("\\", "/"))
         group.addKnob(file_knob)
 
-        # --- format ---
+        # --- format (Enumeration_Knob — survives rename-undo) ---
         try:
-            link_format = nuke.Link_Knob("format")
-            link_format.makeLink(read_full, "format")
-            link_format.setLabel("format")
-            group.addKnob(link_format)
+            _fmt_list = list(nuke.formats())
+            fmt_values = [str(f) for f in _fmt_list]
+            fmt_current = str(read_node["format"].value()) if "format" in read_node.knobs() else ""
+            if fmt_current and fmt_current not in fmt_values:
+                fmt_values.append(fmt_current)
+            format_knob = nuke.Enumeration_Knob("veo_format", "format", " ".join(fmt_values))
+            format_knob.setValue(fmt_current)
+            group.addKnob(format_knob)
+            _read_sync_knobs.append(("veo_format", "format"))
         except Exception:
             pass
 
-        # --- frame range knobs ---
+        # --- frame range knobs (Int_Knob) ---
         if "first" in read_node.knobs():
             try:
-                link = nuke.Link_Knob("first")
-                link.makeLink(read_full, "first")
-                link.setLabel("first")
-                link.setFlag(nuke.STARTLINE)
-                group.addKnob(link)
+                fk = nuke.Int_Knob("veo_first", "first")
+                fk.setValue(int(read_node["first"].value()))
+                fk.setFlag(nuke.STARTLINE)
+                group.addKnob(fk)
+                _read_sync_knobs.append(("veo_first", "first"))
             except Exception:
                 pass
         if "last" in read_node.knobs():
             try:
-                link = nuke.Link_Knob("last")
-                link.makeLink(read_full, "last")
-                link.setLabel("last")
-                link.clearFlag(nuke.STARTLINE)
-                group.addKnob(link)
+                lk = nuke.Int_Knob("veo_last", "last")
+                lk.setValue(int(read_node["last"].value()))
+                lk.clearFlag(nuke.STARTLINE)
+                group.addKnob(lk)
+                _read_sync_knobs.append(("veo_last", "last"))
             except Exception:
                 pass
 
+        # --- frame_mode / frame (Enumeration_Knob + Int_Knob) ---
         if "frame_mode" in read_node.knobs():
             try:
-                link = nuke.Link_Knob("frame_mode")
-                link.makeLink(read_full, "frame_mode")
-                link.setLabel("frame mode")
-                link.setFlag(nuke.STARTLINE)
-                group.addKnob(link)
+                fmk = nuke.Enumeration_Knob("veo_frame_mode", "frame mode", read_node["frame_mode"].enums())
+                fmk.setValue(read_node["frame_mode"].value())
+                fmk.setFlag(nuke.STARTLINE)
+                group.addKnob(fmk)
+                _read_sync_knobs.append(("veo_frame_mode", "frame_mode"))
             except Exception:
                 pass
         if "frame" in read_node.knobs():
             try:
-                link = nuke.Link_Knob("frame")
-                link.makeLink(read_full, "frame")
-                link.setLabel("frame")
-                link.clearFlag(nuke.STARTLINE)
-                group.addKnob(link)
+                frk = nuke.Int_Knob("veo_frame", "frame")
+                frk.setValue(int(read_node["frame"].value()))
+                frk.clearFlag(nuke.STARTLINE)
+                group.addKnob(frk)
+                _read_sync_knobs.append(("veo_frame", "frame"))
             except Exception:
                 pass
 
         if "origfirst" in read_node.knobs():
             try:
-                link = nuke.Link_Knob("origfirst")
-                link.makeLink(read_full, "origfirst")
-                link.setLabel("origfirst")
-                link.setFlag(nuke.STARTLINE)
-                group.addKnob(link)
+                ofk = nuke.Int_Knob("veo_origfirst", "origfirst")
+                ofk.setValue(int(read_node["origfirst"].value()))
+                ofk.setFlag(nuke.STARTLINE)
+                group.addKnob(ofk)
+                _read_sync_knobs.append(("veo_origfirst", "origfirst"))
             except Exception:
                 pass
         if "origlast" in read_node.knobs():
             try:
-                link = nuke.Link_Knob("origlast")
-                link.makeLink(read_full, "origlast")
-                link.setLabel("origlast")
-                link.clearFlag(nuke.STARTLINE)
-                group.addKnob(link)
+                olk = nuke.Int_Knob("veo_origlast", "origlast")
+                olk.setValue(int(read_node["origlast"].value()))
+                olk.clearFlag(nuke.STARTLINE)
+                group.addKnob(olk)
+                _read_sync_knobs.append(("veo_origlast", "origlast"))
             except Exception:
                 pass
 
-        # --- on_error ---
+        # --- on_error (Enumeration_Knob) ---
         if "on_error" in read_node.knobs():
             try:
-                link = nuke.Link_Knob("on_error")
-                link.makeLink(read_full, "on_error")
-                link.setLabel("missing frames")
-                link.setFlag(nuke.STARTLINE)
-                group.addKnob(link)
+                oek = nuke.Enumeration_Knob("veo_on_error", "missing frames", read_node["on_error"].enums())
+                oek.setValue(read_node["on_error"].value())
+                oek.setFlag(nuke.STARTLINE)
+                group.addKnob(oek)
+                _read_sync_knobs.append(("veo_on_error", "on_error"))
             except Exception:
                 pass
 
-        # --- colorspace, premultiplied, raw, auto_alpha ---
+        # --- colorspace (Enumeration_Knob) ---
         if "colorspace" in read_node.knobs():
             try:
-                link = nuke.Link_Knob("colorspace")
-                link.makeLink(read_full, "colorspace")
-                link.setLabel(read_node["colorspace"].label() or "colorspace")
-                link.setFlag(nuke.STARTLINE)
-                group.addKnob(link)
+                csk = nuke.Enumeration_Knob("veo_colorspace", read_node["colorspace"].label() or "colorspace", read_node["colorspace"].enums())
+                csk.setValue(read_node["colorspace"].value())
+                csk.setFlag(nuke.STARTLINE)
+                group.addKnob(csk)
+                _read_sync_knobs.append(("veo_colorspace", "colorspace"))
             except Exception:
                 pass
-        for kname in ["premultiplied", "raw", "auto_alpha"]:
-            if kname in read_node.knobs():
+        for _kname in ["premultiplied", "raw", "auto_alpha"]:
+            if _kname in read_node.knobs():
                 try:
-                    link = nuke.Link_Knob(kname)
-                    link.makeLink(read_full, kname)
-                    link.setLabel(read_node[kname].label() or kname)
-                    link.clearFlag(nuke.STARTLINE)
-                    group.addKnob(link)
+                    _bk = nuke.Boolean_Knob("veo_" + _kname, read_node[_kname].label() or _kname)
+                    _bk.setValue(int(bool(read_node[_kname].value())))
+                    _bk.clearFlag(nuke.STARTLINE)
+                    group.addKnob(_bk)
+                    _read_sync_knobs.append(("veo_" + _kname, _kname))
                 except Exception:
                     pass
-
-        # --- MOV Options section ---
-        mov_knob_names = [
+        # --- MOV Options section (real knobs — NOT Link_Knob) ---
+        _mov_knob_names = [
             "ycbcr_matrix", "mov_data_range",
             "first_track_only", "metadata", "noprefix", "match_key_format",
             "mov64_decode_codec", "mov_decode_codec",
             "video_codec_knob",
         ]
         mov_divider_added = False
-        for kname in mov_knob_names:
+        for kname in _mov_knob_names:
             if kname in read_node.knobs():
                 if not mov_divider_added:
                     mov_div = nuke.Text_Knob("mov_divider", "MOV Options")
                     group.addKnob(mov_div)
                     mov_divider_added = True
                 try:
-                    link = nuke.Link_Knob(kname)
-                    link.makeLink(read_full, kname)
-                    link.setLabel(read_node[kname].label() or kname)
-                    group.addKnob(link)
+                    _rk_obj = read_node[kname]
+                    _cls_name = _rk_obj.Class()
+                    if _cls_name in ("Enumeration_Knob",):
+                        _ek = nuke.Enumeration_Knob("veo_" + kname, _rk_obj.label() or kname, _rk_obj.enums())
+                        _ek.setValue(_rk_obj.value())
+                        group.addKnob(_ek)
+                        _read_sync_knobs.append(("veo_" + kname, kname))
+                    elif _cls_name in ("String_Knob", "File_Knob", "WHK_Knob"):
+                        _sk = nuke.String_Knob("veo_" + kname, _rk_obj.label() or kname)
+                        _sk.setValue(str(_rk_obj.value()))
+                        group.addKnob(_sk)
+                        _read_sync_knobs.append(("veo_" + kname, kname))
+                    else:
+                        # Fallback: use string knob
+                        _sk2 = nuke.String_Knob("veo_" + kname, _rk_obj.label() or kname)
+                        _sk2.setValue(str(_rk_obj.value()))
+                        group.addKnob(_sk2)
+                        _read_sync_knobs.append(("veo_" + kname, kname))
                 except Exception:
                     pass
 
@@ -1114,16 +1234,66 @@ def create_veo_viewer_node(generator_node, prompt, aspect_ratio, duration,
         open_btn.setFlag(nuke.STARTLINE)
         group.addKnob(open_btn)
 
-        # --- knobChanged callback to sync veo_file → internal Read's file ---
+        # --- knobChanged callback: sync ALL exposed knobs <-> internal Read ---
+        # Uses name-based lookup (nuke.toNode('InternalRead')) so it survives
+        # rename-undo.  When any exposed knob changes, push its value into
+        # the corresponding internal Read knob.
+        _sync_pairs_str = repr(_read_sync_knobs).replace("'", '"')
         kc_script = (
+            "import nuke\n"
             "n = nuke.thisNode()\n"
             "k = nuke.thisKnob()\n"
-            "if k.name() == 'veo_file':\n"
+            "kn = k.name()\n"
+            "# ===== DEBUG: knobChanged fired =====\n"
+            "_dbg = '[VEO-DEBUG] knobChanged: node=%s knob=%s value=%s' % (n.name(), kn, str(k.value())[:80])\n"
+            "print(_dbg)\n"
+            "n.begin()\n"
+            "r = nuke.toNode('InternalRead')\n"
+            "n.end()\n"
+            "_dbg2 = '[VEO-DEBUG] InternalRead found=%s' % (r is not None)\n"
+            "print(_dbg2)\n"
+            "if not r:\n"
+            "    print('[VEO-DEBUG] WARNING: InternalRead NOT FOUND!')\n"
+            "    pass\n"
+            "# File changed: load into Read + pull fresh values\n"
+            "if kn == 'veo_file' and r:\n"
             "    n.begin()\n"
-            "    r = nuke.toNode('InternalRead')\n"
+            "    r['file'].fromUserText(k.value())\n"
             "    n.end()\n"
-            "    if r:\n"
-            "        r['file'].fromUserText(k.value())\n"
+            "    # Pull fresh colorspace from Read\n"
+            "    try:\n"
+            "        _cv = str(r['colorspace'].value())\n"
+            "        n['veo_colorspace'].setValue(_cv)\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "    # Force postage stamp refresh\n"
+            "    if 'postage_stamp' in n.knobs():\n"
+            "        n['postage_stamp'].setValue(True)\n"
+            "    try:\n"
+            "        n.sample('red', 0, 0)\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "# Sync Group -> Read for all other exposed knobs\n"
+            "_pairs = " + _sync_pairs_str + "\n"
+            "for _gk, _rk in _pairs:\n"
+            "    if kn == _gk and r and _rk in r.knobs():\n"
+            "        try:\n"
+            "            if _rk == 'format':\n"
+            "                n.begin()\n"
+            "                r['format'].setValue(k.value())\n"
+            "                n.end()\n"
+            "            elif isinstance(r[_rk].value(), int):\n"
+            "                n.begin()\n"
+            "                r[_rk].setValue(int(k.value()))\n"
+            "                n.end()\n"
+            "            else:\n"
+            "                n.begin()\n"
+            "                r[_rk].setValue(k.value())\n"
+            "                n.end()\n"
+            "            print('[VEO-DEBUG] Synced %s -> %s = %s' % (_gk, _rk, str(k.value())[:60]))\n"
+            "        except Exception as _e:\n"
+            "            print('[VEO-DEBUG] SYNC ERROR %s->%s: %s' % (_gk, _rk, _e))\n"
+            "print('[VEO-DEBUG] knobChanged done for %s' % kn)\n"
         )
         group["knobChanged"].setValue(kc_script)
 
@@ -1249,76 +1419,169 @@ def create_veo_viewer_standalone(xpos=None, ypos=None):
         group.end()
 
         # ==============================================================
-        # Tab 1: Read
+        # Tab 1: Read  (REAL knobs — NOT Link_Knob — survive rename-undo)
         # ==============================================================
-        read_full = read_node.fullName()
-
         tab_read = nuke.Tab_Knob("read_tab", "Read")
         group.addKnob(tab_read)
+
+        _read_sync_knobs = []  # (group_knob_name, internal_read_knob_name)
 
         # --- file knob ---
         file_knob = nuke.File_Knob("veo_file", "file")
         group.addKnob(file_knob)
 
-        # --- format ---
+        # --- format (Enumeration_Knob — survives rename-undo) ---
         try:
-            link_format = nuke.Link_Knob("format")
-            link_format.makeLink(read_full, "format")
-            link_format.setLabel("format")
-            group.addKnob(link_format)
+            _fmt_list = list(nuke.formats())
+            fmt_values = [str(f) for f in _fmt_list]
+            fmt_current = str(read_node["format"].value()) if "format" in read_node.knobs() else ""
+            if fmt_current and fmt_current not in fmt_values:
+                fmt_values.append(fmt_current)
+            format_knob = nuke.Enumeration_Knob("veo_format", "format", " ".join(fmt_values))
+            format_knob.setValue(fmt_current)
+            group.addKnob(format_knob)
+            _read_sync_knobs.append(("veo_format", "format"))
         except Exception:
             pass
 
-        # --- frame range knobs ---
-        for kn_name, kn_label, start in [
-            ("first", "first", True), ("last", "last", False),
-            ("frame_mode", "frame mode", True), ("frame", "frame", False),
-            ("origfirst", "origfirst", True), ("origlast", "origlast", False),
-        ]:
-            if kn_name in read_node.knobs():
-                try:
-                    link = nuke.Link_Knob(kn_name)
-                    link.makeLink(read_full, kn_name)
-                    link.setLabel(kn_label)
-                    if start:
-                        link.setFlag(nuke.STARTLINE)
-                    else:
-                        link.clearFlag(nuke.STARTLINE)
-                    group.addKnob(link)
-                except Exception:
-                    pass
+        # --- frame range knobs (Int_Knob) ---
+        if "first" in read_node.knobs():
+            try:
+                fk = nuke.Int_Knob("veo_first", "first")
+                fk.setValue(int(read_node["first"].value()))
+                fk.setFlag(nuke.STARTLINE)
+                group.addKnob(fk)
+                _read_sync_knobs.append(("veo_first", "first"))
+            except Exception:
+                pass
+        if "last" in read_node.knobs():
+            try:
+                lk = nuke.Int_Knob("veo_last", "last")
+                lk.setValue(int(read_node["last"].value()))
+                lk.clearFlag(nuke.STARTLINE)
+                group.addKnob(lk)
+                _read_sync_knobs.append(("veo_last", "last"))
+            except Exception:
+                pass
 
-        # --- on_error ---
+        # --- frame_mode / frame (Enumeration_Knob + Int_Knob) ---
+        if "frame_mode" in read_node.knobs():
+            try:
+                fmk = nuke.Enumeration_Knob("veo_frame_mode", "frame mode", read_node["frame_mode"].enums())
+                fmk.setValue(read_node["frame_mode"].value())
+                fmk.setFlag(nuke.STARTLINE)
+                group.addKnob(fmk)
+                _read_sync_knobs.append(("veo_frame_mode", "frame_mode"))
+            except Exception:
+                pass
+        if "frame" in read_node.knobs():
+            try:
+                frk = nuke.Int_Knob("veo_frame", "frame")
+                frk.setValue(int(read_node["frame"].value()))
+                frk.clearFlag(nuke.STARTLINE)
+                group.addKnob(frk)
+                _read_sync_knobs.append(("veo_frame", "frame"))
+            except Exception:
+                pass
+
+        if "origfirst" in read_node.knobs():
+            try:
+                ofk = nuke.Int_Knob("veo_origfirst", "origfirst")
+                ofk.setValue(int(read_node["origfirst"].value()))
+                ofk.setFlag(nuke.STARTLINE)
+                group.addKnob(ofk)
+                _read_sync_knobs.append(("veo_origfirst", "origfirst"))
+            except Exception:
+                pass
+        if "origlast" in read_node.knobs():
+            try:
+                olk = nuke.Int_Knob("veo_origlast", "origlast")
+                olk.setValue(int(read_node["origlast"].value()))
+                olk.clearFlag(nuke.STARTLINE)
+                group.addKnob(olk)
+                _read_sync_knobs.append(("veo_origlast", "origlast"))
+            except Exception:
+                pass
+
+        # --- on_error (Enumeration_Knob) ---
         if "on_error" in read_node.knobs():
             try:
-                link = nuke.Link_Knob("on_error")
-                link.makeLink(read_full, "on_error")
-                link.setLabel("missing frames")
-                link.setFlag(nuke.STARTLINE)
-                group.addKnob(link)
+                oek = nuke.Enumeration_Knob("veo_on_error", "missing frames", read_node["on_error"].enums())
+                oek.setValue(read_node["on_error"].value())
+                oek.setFlag(nuke.STARTLINE)
+                group.addKnob(oek)
+                _read_sync_knobs.append(("veo_on_error", "on_error"))
             except Exception:
                 pass
 
-        # --- colorspace, premultiplied, raw, auto_alpha ---
+        # --- colorspace (Enumeration_Knob) ---
         if "colorspace" in read_node.knobs():
             try:
-                link = nuke.Link_Knob("colorspace")
-                link.makeLink(read_full, "colorspace")
-                link.setLabel(read_node["colorspace"].label() or "colorspace")
-                link.setFlag(nuke.STARTLINE)
-                group.addKnob(link)
+                csk = nuke.Enumeration_Knob("veo_colorspace", read_node["colorspace"].label() or "colorspace", read_node["colorspace"].enums())
+                csk.setValue(read_node["colorspace"].value())
+                csk.setFlag(nuke.STARTLINE)
+                group.addKnob(csk)
+                _read_sync_knobs.append(("veo_colorspace", "colorspace"))
             except Exception:
                 pass
-        for kname in ["premultiplied", "raw", "auto_alpha"]:
-            if kname in read_node.knobs():
+        for _kname in ["premultiplied", "raw", "auto_alpha"]:
+            if _kname in read_node.knobs():
                 try:
-                    link = nuke.Link_Knob(kname)
-                    link.makeLink(read_full, kname)
-                    link.setLabel(read_node[kname].label() or kname)
-                    link.clearFlag(nuke.STARTLINE)
-                    group.addKnob(link)
+                    _bk = nuke.Boolean_Knob("veo_" + _kname, read_node[_kname].label() or _kname)
+                    _bk.setValue(int(bool(read_node[_kname].value())))
+                    _bk.clearFlag(nuke.STARTLINE)
+                    group.addKnob(_bk)
+                    _read_sync_knobs.append(("veo_" + _kname, _kname))
                 except Exception:
                     pass
+
+        # --- MOV Options section (real knobs — NOT Link_Knob) ---
+        _mov_knob_names = [
+            "ycbcr_matrix", "mov_data_range",
+            "first_track_only", "metadata", "noprefix", "match_key_format",
+            "mov64_decode_codec", "mov_decode_codec",
+            "video_codec_knob",
+        ]
+        mov_divider_added = False
+        for kname in _mov_knob_names:
+            if kname in read_node.knobs():
+                if not mov_divider_added:
+                    mov_div = nuke.Text_Knob("mov_divider", "MOV Options")
+                    group.addKnob(mov_div)
+                    mov_divider_added = True
+                try:
+                    _rk_obj = read_node[kname]
+                    _cls_name = _rk_obj.Class()
+                    if _cls_name in ("Enumeration_Knob",):
+                        _ek = nuke.Enumeration_Knob("veo_" + kname, _rk_obj.label() or kname, _rk_obj.enums())
+                        _ek.setValue(_rk_obj.value())
+                        group.addKnob(_ek)
+                        _read_sync_knobs.append(("veo_" + kname, kname))
+                    elif _cls_name in ("String_Knob", "File_Knob", "WHK_Knob"):
+                        _sk = nuke.String_Knob("veo_" + kname, _rk_obj.label() or kname)
+                        _sk.setValue(str(_rk_obj.value()))
+                        group.addKnob(_sk)
+                        _read_sync_knobs.append(("veo_" + kname, kname))
+                    else:
+                        _sk2 = nuke.String_Knob("veo_" + kname, _rk_obj.label() or kname)
+                        _sk2.setValue(str(_rk_obj.value()))
+                        group.addKnob(_sk2)
+                        _read_sync_knobs.append(("veo_" + kname, kname))
+                except Exception:
+                    pass
+
+        if mov_divider_added:
+            try:
+                codec_val = ""
+                if "video_codec_knob" in read_node.knobs():
+                    codec_val = read_node["video_codec_knob"].value()
+                elif "mov64_decode_codec" in read_node.knobs():
+                    codec_val = read_node["mov64_decode_codec"].value()
+                if codec_val:
+                    codec_text = nuke.Text_Knob("video_codec_display", "Video Codec", str(codec_val))
+                    group.addKnob(codec_text)
+            except Exception:
+                pass
 
         # --- Open Full Read Properties button ---
         open_read_script = (
@@ -1332,16 +1595,63 @@ def create_veo_viewer_standalone(xpos=None, ypos=None):
         open_btn.setFlag(nuke.STARTLINE)
         group.addKnob(open_btn)
 
-        # --- knobChanged callback to sync veo_file → internal Read's file ---
+        # --- knobChanged callback: sync ALL exposed knobs <-> internal Read ---
+        _sync_pairs_str = repr(_read_sync_knobs).replace("'", '"')
         kc_script = (
+            "import nuke\n"
             "n = nuke.thisNode()\n"
             "k = nuke.thisKnob()\n"
-            "if k.name() == 'veo_file':\n"
+            "kn = k.name()\n"
+            "# ===== DEBUG: knobChanged fired =====\n"
+            "_dbg = '[VEO-DEBUG] knobChanged: node=%s knob=%s value=%s' % (n.name(), kn, str(k.value())[:80])\n"
+            "print(_dbg)\n"
+            "n.begin()\n"
+            "r = nuke.toNode('InternalRead')\n"
+            "n.end()\n"
+            "_dbg2 = '[VEO-DEBUG] InternalRead found=%s' % (r is not None)\n"
+            "print(_dbg2)\n"
+            "if not r:\n"
+            "    print('[VEO-DEBUG] WARNING: InternalRead NOT FOUND!')\n"
+            "    pass\n"
+            "# File changed: load into Read + pull fresh values\n"
+            "if kn == 'veo_file' and r:\n"
             "    n.begin()\n"
-            "    r = nuke.toNode('InternalRead')\n"
+            "    r['file'].fromUserText(k.value())\n"
             "    n.end()\n"
-            "    if r:\n"
-            "        r['file'].fromUserText(k.value())\n"
+            "    # Pull fresh colorspace from Read\n"
+            "    try:\n"
+            "        _cv = str(r['colorspace'].value())\n"
+            "        n['veo_colorspace'].setValue(_cv)\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "    # Force postage stamp refresh\n"
+            "    if 'postage_stamp' in n.knobs():\n"
+            "        n['postage_stamp'].setValue(True)\n"
+            "    try:\n"
+            "        n.sample('red', 0, 0)\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "# Sync Group -> Read for all other exposed knobs\n"
+            "_pairs = " + _sync_pairs_str + "\n"
+            "for _gk, _rk in _pairs:\n"
+            "    if kn == _gk and r and _rk in r.knobs():\n"
+            "        try:\n"
+            "            if _rk == 'format':\n"
+            "                n.begin()\n"
+            "                r['format'].setValue(k.value())\n"
+            "                n.end()\n"
+            "            elif isinstance(r[_rk].value(), int):\n"
+            "                n.begin()\n"
+            "                r[_rk].setValue(int(k.value()))\n"
+            "                n.end()\n"
+            "            else:\n"
+            "                n.begin()\n"
+            "                r[_rk].setValue(k.value())\n"
+            "                n.end()\n"
+            "            print('[VEO-DEBUG] Synced %s -> %s = %s' % (_gk, _rk, str(k.value())[:60]))\n"
+            "        except Exception as _e:\n"
+            "            print('[VEO-DEBUG] SYNC ERROR %s->%s: %s' % (_gk, _rk, _e))\n"
+            "print('[VEO-DEBUG] knobChanged done for %s' % kn)\n"
         )
         group["knobChanged"].setValue(kc_script)
 
