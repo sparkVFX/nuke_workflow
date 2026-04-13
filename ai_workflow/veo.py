@@ -144,17 +144,41 @@ def _find_ffmpeg():
     return None
 
 
-def _convert_mp4_to_prores(mp4_path, status_callback=None):
-    """Convert an MP4 file to ProRes 422 MOV using ffmpeg.
+def _convert_mp4_to_prores(mp4_path, status_callback=None, codec=None):
+    """Convert an MP4 file to ProRes MOV using ffmpeg.
     
     Args:
         mp4_path: Path to the source .mp4 file.
         status_callback: Optional callable(str) for status messages.
+        codec: Optional str — ProRes profile name (default from NanoBananaSettings).
+               Supported: "ProRes 422 HQ", "ProRes 422", "ProRes 422 LT",
+               "ProRes 422 Proxy"
     
     Returns:
         mov_path (str) on success, or mp4_path unchanged if ffmpeg is unavailable.
     """
     import subprocess
+
+    # Map user-friendly names to ffmpeg -profile:v values + pixel format
+    _PROFILE_MAP = {
+        "ProRes 422 HQ":   ("3", "yuva444p10le"),   # Profile 3 = HQ, ~184 Mbps
+        "ProRes 422":      ("2", "yuva444p10le"),   # Profile 2 = Standard, ~122 Mbps
+        "ProRes 422 LT":   ("1", "yuv422p10le"),    # Profile 1 = LT, ~85 Mbps
+        "ProRes 422 Proxy":("0", "yuv422p10le"),    # Profile 0 = Proxy, ~38 Mbps
+    }
+
+    # Resolve codec: explicit arg → Settings → fallback to HQ
+    if not codec:
+        try:
+            from ai_workflow.nanobanana import NanoBananaSettings
+            codec = NanoBananaSettings().prores_codec
+        except Exception:
+            codec = "ProRes 422 HQ"
+
+    profile_val, pix_fmt = _PROFILE_MAP.get(codec, _PROFILE_MAP["ProRes 422 HQ"])
+
+    print("[NB Transcode] Converting '{}' to ProRes MOV | codec={} | profile={}".format(
+        mp4_path, codec, profile_val))
 
     ffmpeg = _find_ffmpeg()
     if not ffmpeg:
@@ -171,8 +195,8 @@ def _convert_mp4_to_prores(mp4_path, status_callback=None):
         "-y",                     # overwrite without asking
         "-i", mp4_path,           # input
         "-c:v", "prores_ks",      # ProRes encoder
-        "-profile:v", "2",        # Profile 2 = ProRes 422 (Normal)
-        "-pix_fmt", "yuva444p10le",  # 10-bit with alpha support
+        "-profile:v", profile_val,# Dynamic profile from settings
+        "-pix_fmt", pix_fmt,      # Pixel format (HQ/Std=10bit+alpha, LT/Proxy=10bit)
         "-c:a", "pcm_s16le",      # audio codec (lossless PCM)
         mov_path,
     ]

@@ -37,6 +37,15 @@ import random
 import base64
 import datetime
 
+
+class _DropDownComboBox(QtWidgets.QComboBox):
+    """QComboBox that always shows popup below the widget (not covering it)."""
+    def showPopup(self):
+        super(_DropDownComboBox, self).showPopup()
+        popup = self.view().window()
+        pos = self.mapToGlobal(QtCore.QPoint(0, self.height()))
+        popup.move(pos)
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -330,6 +339,15 @@ class NanoBananaSettings:
         self._data["veo_prompt_history"] = value
         self._save()
 
+    @property
+    def prores_codec(self):
+        return self._data.get("prores_codec", "ProRes 422 HQ")
+
+    @prores_codec.setter
+    def prores_codec(self, value):
+        self._data["prores_codec"] = value
+        self._save()
+
 
 # ---------------------------------------------------------------------------
 # Settings Dialog
@@ -425,6 +443,37 @@ class NanoBananaSettingsDialog(QtWidgets.QDialog):
         
         layout.addWidget(temp_group)
         
+        # === ProRes Transcode Section ===
+        prores_group = QtWidgets.QGroupBox("ProRes Transcode")
+        prores_layout = QtWidgets.QVBoxLayout(prores_group)
+        
+        prores_label = QtWidgets.QLabel("Codec for output video (used when writing ProRes):")
+        prores_label.setStyleSheet("color: #aaa; font-size: 11px;")
+        prores_label.setWordWrap(True)
+        prores_layout.addWidget(prores_label)
+        
+        self.prores_combo = _DropDownComboBox()
+        _prores_options = [
+            ("ProRes 422 HQ", "ProRes 422 HQ", "~184 Mbps | 100% | 1:8 | 极低损失"),
+            ("ProRes 422", "ProRes 422", "~122 Mbps | 66% | 1:12 | 低损失"),
+            ("ProRes 422 LT", "ProRes 422 LT", "~85 Mbps | 45% | 1:17 | 中等损失"),
+            ("ProRes 422 Proxy", "ProRes 422 Proxy", "~38 Mbps | 20% | 1:38 | 高损失(预览用)"),
+        ]
+        for display_name, value, desc in _prores_options:
+            self.prores_combo.addItem("{} — {}".format(display_name, desc))
+            # Store the actual codec name as userData
+            self.prores_combo.setItemData(self.prores_combo.count() - 1, value)
+        # Set current selection from saved settings
+        current_codec = self.settings._data.get("prores_codec", "ProRes 422 HQ")
+        idx = self.prores_combo.findData(current_codec)
+        if idx >= 0:
+            self.prores_combo.setCurrentIndex(idx)
+        else:
+            self.prores_combo.setCurrentIndex(0)
+        prores_layout.addWidget(self.prores_combo)
+        
+        layout.addWidget(prores_group)
+        
         # === Buttons ===
         btn_layout = QtWidgets.QHBoxLayout()
         btn_layout.addStretch()
@@ -504,6 +553,12 @@ class NanoBananaSettingsDialog(QtWidgets.QDialog):
     def _save_settings(self):
         self.settings.api_key = self.api_key_input.text().strip()
         self.settings.temp_directory = self.temp_dir_input.text().strip()
+        # Save selected ProRes codec
+        idx = self.prores.currentIndex()
+        if idx >= 0:
+            codec = self.prores.itemData(idx)
+            if codec:
+                self.settings.prores_codec = codec
         self.accept()
 
 
