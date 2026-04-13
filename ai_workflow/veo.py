@@ -1188,13 +1188,15 @@ def create_veo_viewer_node(generator_node, prompt, aspect_ratio, duration,
         output_knob.setFlag(nuke.INVISIBLE)
         group.addKnob(output_knob)
 
-        input_data = {
-            "reference_images": reference_image_paths or [],
-        }
+        # Store input reference images as JSON array (same format as NanoBanana)
+        input_img_paths = list(reference_image_paths or [])
+        print("[VEO Viewer] veo_input_images: storing {} paths".format(len(input_img_paths)))
+        for _ip in input_img_paths:
+            print("  [VEO Viewer]   -> {}".format(_ip))
         inputs_knob = nuke.Multiline_Eval_String_Knob("veo_input_images", "Input Images (JSON)")
         inputs_knob.setFlag(nuke.INVISIBLE)
         group.addKnob(inputs_knob)
-        inputs_knob.setValue(json.dumps(input_data))
+        inputs_knob.setValue(json.dumps(input_img_paths))
 
         # --- PyCustom_Knob for regenerate UI ---
         regen_divider = nuke.Text_Knob("regen_divider", "")
@@ -1382,7 +1384,7 @@ def create_veo_viewer_standalone(xpos=None, ypos=None):
         inputs_knob = nuke.Multiline_Eval_String_Knob("veo_input_images", "Input Images (JSON)")
         inputs_knob.setFlag(nuke.INVISIBLE)
         group.addKnob(inputs_knob)
-        inputs_knob.setValue(json.dumps({"reference_images": []}))
+        inputs_knob.setValue(json.dumps([]))
 
         # --- PyCustom_Knob for regenerate UI ---
         regen_divider = nuke.Text_Knob("regen_divider", "")
@@ -2152,6 +2154,133 @@ class VeoWidget(QtWidgets.QWidget):
             self.pbar.reset()
 
 
+
+# ---------------------------------------------------------------------------
+# Helpers to collect input image paths for VEO Viewer (mirrors NanoBanana)
+# ---------------------------------------------------------------------------
+
+def _find_veo_generator(viewer_node):
+    """Find the generator name for this VEO Viewer node.
+
+    Priority 1: veo_generator knob (fast path).
+    Priority 2: Walk upstream to find a VEO_Generate node.
+    """
+    if not viewer_node:
+        return ""
+
+    # Fast path: stored generator name
+    if "veo_generator" in viewer_node.knobs():
+        stored = viewer_node["veo_generator"].value() or ""
+        if stored:
+            return stored
+
+    # Slow path: walk upstream
+    try:
+        visited = set()
+        queue = [viewer_node]
+        while queue:
+            cur = queue.pop(0)
+            name = cur.name() if hasattr(cur, "name") else "?"
+            if name in visited:
+                continue
+            visited.add(name)
+            if name.startswith("veo") or name.startswith("VEO"):
+                if "is_veo_viewer" not in cur.knobs():
+                    return name
+            max_inputs = getattr(cur, "inputs", lambda: 0)()
+            for i in range(max_inputs):
+                inp = cur.input(i)
+                if inp:
+                    queue.append(inp)
+    except Exception as e:
+        print("[VEO InputScan] Error walking upstream: {}".format(e))
+
+    return ""
+
+
+def _collect_veo_input_images_for_round(gen_name):
+    """Find cached input images for a specific VEO generation round.
+
+    Scans get_input_directory() for files matching:
+      {GenName}_{Label}_frame{N}.png
+    """
+    paths = []
+    try:
+        input_dir = get_input_directory()
+        if not os.path.isdir(input_dir):
+            return paths
+
+        prefix = "{}_".format(gen_name)
+        extensions = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+        for fname in sorted(os.listdir(input_dir)):
+            if fname.startswith(prefix):
+                ext = os.path.splitext(fname)[1].lower()
+                if ext in extensions:
+                    fpath = os.path.join(input_dir, fname).replace("\\", "/")
+                    paths.append(fpath)
+
+        print("[VEO InputScan] Found {} image(s) for gen='{}' in input dir".format(
+            len(paths), gen_name))
+        for p in paths:
+            exists = os.path.exists(p)
+            print("  [VEO InputScan]   -> {} [{}]".format(p, "OK" if exists else "MISSING"))
+    except Exception as e:
+        print("[VEO InputScan] Error scanning input dir for '{}': {}".format(gen_name, e))
+
+    return paths
+
+
+def _collect_veo_input_image_paths(node):
+    """Main entry point: collect reference images for this VEO Viewer node.
+
+    Priority 1 (primary): Read veo_input_images JSON knob.
+    Priority 2 (fallback): Scan input cache dir via generator name.
+
+    Returns list of file path strings (same format as NanoBanana).
+    """
+    # Step 1: PRIMARY — try JSON knob first
+    if node and "veo_input_images" in node.knobs():
+        try:
+            raw = node["veo_input_images"].value()
+            print("[VEO InputScan] Step 1: knob exists, raw length={} chars".format(
+                len(raw) if raw else 0))
+            if raw and raw.strip():
+                parsed = json.loads(raw)
+                # Support both formats:
+                # New: plain array ["path1", "path2"]
+                # Old: {"reference_images": ["path1", "path2"]}
+                if isinstance(parsed, list):
+                    paths = [p for p in parsed if p]
+                elif isinstance(parsed, dict):
+                    paths = [p for p in parsed.get("reference_images", []) if p]
+                else:
+                    paths = []
+                if paths:
+                    found_count = sum(1 for p in paths if os.path.exists(p))
+                    print("[VEO InputScan] Primary (JSON): {} image(s), {} on disk".format(
+                        len(paths), found_count))
+                    return paths
+                else:
+                    print("[VEO InputScan] Step 1: JSON parsed but empty list")
+            else:
+                print("[VEO InputScan] Step 1: knob value is blank/empty")
+        except Exception as e:
+            print("[VEO InputScan] JSON knob parse error: {}".format(e))
+    else:
+        print("[VEO InputScan] Step 1: knob not found on node")
+
+    # Step 2: FALLBACK — scan input cache directory by generator name
+    gen_name = _find_veo_generator(node)
+    if gen_name:
+        paths = _collect_veo_input_images_for_round(gen_name)
+        if paths:
+            return paths
+
+    print("[VEO InputScan] No images found for '{}'".format(
+        node.name() if node else "?"))
+    return []
+
+
 # ---------------------------------------------------------------------------
 # VEO Record Widget (read-only record + editable regeneration UI)
 # ---------------------------------------------------------------------------
@@ -2416,18 +2545,17 @@ class VeoRecordWidget(QtWidgets.QWidget):
             if "veo_neg_prompt" in self.node.knobs():
                 self.neg_prompt_display.setPlainText(self.node["veo_neg_prompt"].value())
 
-            # Cached images info
-            if "veo_input_images" in self.node.knobs():
-                try:
-                    data = json.loads(self.node["veo_input_images"].value())
-                    ref_list = data.get("reference_images", [])
-                    cached_refs = sum(1 for r in ref_list if r and os.path.exists(r))
-                    if cached_refs > 0:
-                        self.cached_info_label.setText("Cached refs: {}".format(cached_refs))
-                    else:
-                        self.cached_info_label.setText("Text-only generation")
-                except:
-                    self.cached_info_label.setText("")
+            # Cached images info (using unified collection function)
+            try:
+                all_ref_paths = _collect_veo_input_image_paths(self.node)
+                if all_ref_paths:
+                    found = sum(1 for p in all_ref_paths if os.path.exists(p))
+                    self.cached_info_label.setText(
+                        "{} image(s) ({} available)".format(len(all_ref_paths), found))
+                else:
+                    self.cached_info_label.setText("Text-only generation")
+            except Exception:
+                self.cached_info_label.setText("")
 
             # Read node reference
             if "veo_read_node" in self.node.knobs():
@@ -2488,16 +2616,31 @@ class VeoRecordWidget(QtWidgets.QWidget):
             if "veo_neg_prompt" in self.node.knobs():
                 self.neg_prompt_edit.setText(self.node["veo_neg_prompt"].value())
 
-            # Load cached reference images into the ImageStrip
-            if "veo_input_images" in self.node.knobs():
-                try:
-                    data = json.loads(self.node["veo_input_images"].value())
-                    ref_list = data.get("reference_images", [])
-                    for img_path in ref_list:
-                        if img_path and os.path.exists(img_path):
-                            self._ref_image_strip.add_image(img_path)
-                except Exception:
-                    pass
+            # Load reference images into the ImageStrip (mirrors NanoBanana)
+            try:
+                print("[VEO Regen] >>> Loading input images from knob...")
+                all_paths = _collect_veo_input_image_paths(self.node)
+                found_count = sum(1 for p in all_paths if os.path.exists(p))
+
+                print("[VEO Regen]     TOTAL {} paths ({} found on disk)".format(
+                    len(all_paths), found_count))
+                for vp in all_paths:
+                    print("  [VEO Regen]       -> {} [{}]".format(
+                        vp, "OK" if os.path.exists(vp) else "MISSING"))
+
+                if all_paths:
+                    for p in all_paths:
+                        self._ref_image_strip.add_image(p)
+                    print("[VEO Regen]     DONE - added {} images to strip".format(
+                        len(all_paths)))
+                else:
+                    self._ref_image_strip.clear_images()
+                    print("[VEO Regen]     No images stored")
+            except Exception as ex:
+                print("[VEO Regen]     ERROR loading images: {}".format(ex))
+                import traceback
+                traceback.print_exc()
+                self._ref_image_strip.clear_images()
 
         except Exception as e:
             print("VEO: Error loading record settings: {}".format(e))
@@ -2516,10 +2659,15 @@ class VeoRecordWidget(QtWidgets.QWidget):
 
     def _save_ref_images_to_node(self):
         """Persist the current ImageStrip paths back to the node's veo_input_images knob."""
+        print("[VEO Regen] >>> _save_ref_images_to_node: strip has {} images".format(
+            len(self._ref_image_strip.images) if hasattr(self, '_ref_image_strip') else 0))
         if not self.node or "veo_input_images" not in self.node.knobs():
+            print("[VEO Regen]     SKIPPED - no node or no knob")
             return
         paths = self._ref_image_strip.images if hasattr(self, '_ref_image_strip') else []
-        json_val = json.dumps({"reference_images": paths})
+        for i, p in enumerate(paths):
+            print("  [VEO Regen]   images[{}]: '{}'".format(i, p))
+        json_val = json.dumps(paths)
         self.node["veo_input_images"].setValue(json_val)
 
     def _regenerate(self):
@@ -2556,13 +2704,10 @@ class VeoRecordWidget(QtWidgets.QWidget):
                                      if p and os.path.exists(p)]
             # Sync strip state back to the node knob
             self._save_ref_images_to_node()
-        elif "veo_input_images" in self.node.knobs():
-            try:
-                data = json.loads(self.node["veo_input_images"].value())
-                ref_list = data.get("reference_images", [])
-                reference_image_paths = [r for r in ref_list if r and os.path.exists(r)]
-            except:
-                pass
+        else:
+            # Fallback: use unified collection function
+            reference_image_paths = [p for p in _collect_veo_input_image_paths(self.node)
+                                     if p and os.path.exists(p)]
 
         # Find generator name
         gen_name = "VEO_Generate"
