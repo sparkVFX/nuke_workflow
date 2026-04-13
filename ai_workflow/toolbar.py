@@ -144,6 +144,25 @@ def create_nano_viewer():
     return player
 
 
+def create_veo_viewer():
+    """Manually create a VEO Viewer (video viewer) Group node."""
+    import ai_workflow.veo as veo
+    # Position at DAG center or below selected node
+    sel = nuke.selectedNodes()
+    sel_node = sel[0] if sel else None
+    if sel_node:
+        xpos = int(sel_node["xpos"].value())
+        ypos = int(sel_node["ypos"].value()) + 100
+    else:
+        try:
+            center = nuke.center()
+            xpos, ypos = int(center[0]), int(center[1])
+        except Exception:
+            xpos, ypos = 0, 0
+    viewer, read = veo.create_veo_viewer_standalone(xpos=xpos, ypos=ypos)
+    return viewer
+
+
 def register_toolbar():
     """Register the AI Workflow toolbar in Nuke's left sidebar."""
 
@@ -166,6 +185,11 @@ def register_toolbar():
         "Nano Viewer",
         "ai_workflow.toolbar.create_nano_viewer()",
         icon="Banana.png",
+    )
+    ai_menu.addCommand(
+        "Veo Viewer",
+        "ai_workflow.toolbar.create_veo_viewer()",
+        icon="VEO.png",
     )
     ai_menu.addCommand(
         "Generate Video VEO",

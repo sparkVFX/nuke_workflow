@@ -858,226 +858,568 @@ def _get_internal_read(player_group):
 
 
 # ---------------------------------------------------------------------------
-# Video Record Node Creation
+# VEO Viewer Node (unified: Read playback + record + regeneration in one node)
+# Mirrors NanoBanana's Nano Viewer pattern.
 # ---------------------------------------------------------------------------
-def create_video_record_node(generator_node, prompt, aspect_ratio, duration,
-                             output_video_path,
-                             reference_image_paths=None,
-                             model="Google VEO 3.1-Fast",
-                             resolution="720P",
-                             mode="Text",
-                             negative_prompt=""):
-    """
-    Create a video record (视频记录) node linked to the VEO generator.
+def _next_veo_viewer_name():
+    """Return the next available name like 'VEO_Viewer1', 'VEO_Viewer2', etc."""
+    used = set()
+    for node in nuke.allNodes():
+        m = re.match(r"^VEO_Viewer(\d+)$", node.name())
+        if m:
+            used.add(int(m.group(1)))
+    i = 1
+    while i in used:
+        i += 1
+    return "VEO_Viewer{}".format(i)
+
+
+def create_veo_viewer_node(generator_node, prompt, aspect_ratio, duration,
+                           output_video_path,
+                           reference_image_paths=None,
+                           model="Google VEO 3.1-Fast",
+                           resolution="720P",
+                           mode="Text",
+                           negative_prompt=""):
+    """Create a unified VEO Viewer node (like NanoBanana's Nano Viewer).
+
+    Combines the old sp (record) + VEO Player (Read) into a single Group:
+      - Tab "Read":       Internal Read node with exposed knobs + Send to Studio
+      - Tab "Regenerate": Generation record (read-only) + editable regeneration UI
+
+    Node chain:  Generator → Dot → VEO_Viewer  (no separate sp / Player nodes)
+
+    Returns:
+        (viewer_node, internal_read_node)
     """
     gen_x = generator_node["xpos"].value()
     gen_y = generator_node["ypos"].value()
     gen_name = generator_node.name()
 
-    # Find existing video record nodes for THIS generator
-    existing_records = []
+    # Find existing VEO Viewer nodes for THIS generator
+    existing_viewers = []
     for node in nuke.allNodes("Group"):
-        if "veo_record_tab" in node.knobs():
+        if "is_veo_viewer" in node.knobs():
             if "veo_generator" in node.knobs():
                 if node["veo_generator"].value() == gen_name:
-                    existing_records.append(node)
+                    existing_viewers.append(node)
 
     # Calculate position
-    if existing_records:
-        last_record = max(existing_records, key=lambda n: n["ypos"].value())
-        rec_x = last_record["xpos"].value()
-        rec_y = last_record["ypos"].value() + 150
-        connect_to = last_record
+    if existing_viewers:
+        last_viewer = max(existing_viewers, key=lambda n: n["ypos"].value())
+        vx = last_viewer["xpos"].value()
+        vy = last_viewer["ypos"].value() + 150
+        connect_to = last_viewer
     else:
-        rec_x = gen_x
-        rec_y = gen_y + 150
+        vx = gen_x
+        vy = gen_y + 150
         connect_to = generator_node
 
-    # --- Create a Dot node between generator/previous-record and this record ---
+    # --- Dot node between generator/previous-viewer and this viewer ---
     dot_node = nuke.nodes.Dot()
-    dot_x = int(rec_x) + 34  # Dot is small, offset to center under parent
-    dot_y = int(connect_to["ypos"].value()) + 80 if not existing_records else int(rec_y) - 50
-    if not existing_records:
+    dot_x = int(vx) + 34
+    dot_y = int(connect_to["ypos"].value()) + 80 if not existing_viewers else int(vy) - 50
+    if not existing_viewers:
         dot_y = int(gen_y) + 100
     dot_node["xpos"].setValue(dot_x)
     dot_node["ypos"].setValue(dot_y)
     dot_node.setInput(0, connect_to)
 
-    # Create record node
-    record_num = len(existing_records) + 1
-    record_node = nuke.nodes.Group()
-    record_node.setName("sp{}".format(record_num))
-    record_node["tile_color"].setValue(0x4169E1FF)  # Blue
-    record_node["xpos"].setValue(int(rec_x))
-    record_node["ypos"].setValue(int(rec_y))
+    viewer_num = len(existing_viewers) + 1
 
-    prompt_short = prompt[:40] + "..." if len(prompt) > 40 else prompt
-    record_node["label"].setValue("视频记录sp{}".format(record_num))
+    # ================================================================
+    # Create the unified Group node
+    # ================================================================
+    nuke.Undo.begin("Create VEO Viewer")
+    try:
+        group = nuke.nodes.Group()
+        group.setName(_next_veo_viewer_name())
+        group["tile_color"].setValue(0x2E2E2EFF)  # Dark grey (same as Nano Viewer)
+        group["xpos"].setValue(int(vx))
+        group["ypos"].setValue(int(vy))
 
-    # Internal structure
-    record_node.begin()
-    inp = nuke.nodes.Input(name="Input")
-    out = nuke.nodes.Output(name="Output")
-    out.setInput(0, inp)
-    record_node.end()
+        # --- Build internals: Input → Read → Output ---
+        group.begin()
+        inp_node = nuke.nodes.Input(name="Input")
+        read_node = nuke.nodes.Read(name="InternalRead")
+        out_node = nuke.nodes.Output(name="Output")
+        out_node.setInput(0, read_node)
+        group.end()
 
-    # Record node connects to the Dot
-    record_node.setInput(0, dot_node)
+        # Load the video file AFTER group.end() so knobs are fully populated
+        if output_video_path and os.path.exists(output_video_path):
+            group.begin()
+            read_node["file"].fromUserText(output_video_path)
+            group.end()
 
-    # Add custom tab
-    tab = nuke.Tab_Knob("veo_record_tab", "VEO Record")
-    record_node.addKnob(tab)
+        # Connect to the Dot
+        group.setInput(0, dot_node)
 
-    gen_knob = nuke.String_Knob("veo_generator", "Generator")
-    gen_knob.setValue(gen_name)
-    gen_knob.setFlag(nuke.INVISIBLE)
-    record_node.addKnob(gen_knob)
+        # ==============================================================
+        # Tab 1: Read  (expose Read-node knobs, like create_veo_player_node did)
+        # ==============================================================
+        read_full = read_node.fullName()
 
-    prompt_knob = nuke.Multiline_Eval_String_Knob("veo_prompt", "Prompt")
-    prompt_knob.setValue(prompt)
-    prompt_knob.setFlag(nuke.INVISIBLE)
-    record_node.addKnob(prompt_knob)
+        tab_read = nuke.Tab_Knob("read_tab", "Read")
+        group.addKnob(tab_read)
 
-    ratio_knob = nuke.String_Knob("veo_ratio", "Aspect Ratio")
-    ratio_knob.setValue(aspect_ratio)
-    ratio_knob.setFlag(nuke.INVISIBLE)
-    record_node.addKnob(ratio_knob)
+        # --- file knob ---
+        file_knob = nuke.File_Knob("veo_file", "file")
+        if output_video_path:
+            file_knob.setValue(output_video_path.replace("\\", "/"))
+        group.addKnob(file_knob)
 
-    dur_knob = nuke.String_Knob("veo_duration", "Duration")
-    dur_knob.setValue(duration if duration else "8")
-    dur_knob.setFlag(nuke.INVISIBLE)
-    record_node.addKnob(dur_knob)
+        # --- format ---
+        try:
+            link_format = nuke.Link_Knob("format")
+            link_format.makeLink(read_full, "format")
+            link_format.setLabel("format")
+            group.addKnob(link_format)
+        except Exception:
+            pass
 
-    model_knob = nuke.String_Knob("veo_model", "Model")
-    model_knob.setValue(model)
-    model_knob.setFlag(nuke.INVISIBLE)
-    record_node.addKnob(model_knob)
+        # --- frame range knobs ---
+        if "first" in read_node.knobs():
+            try:
+                link = nuke.Link_Knob("first")
+                link.makeLink(read_full, "first")
+                link.setLabel("first")
+                link.setFlag(nuke.STARTLINE)
+                group.addKnob(link)
+            except Exception:
+                pass
+        if "last" in read_node.knobs():
+            try:
+                link = nuke.Link_Knob("last")
+                link.makeLink(read_full, "last")
+                link.setLabel("last")
+                link.clearFlag(nuke.STARTLINE)
+                group.addKnob(link)
+            except Exception:
+                pass
 
-    res_knob = nuke.String_Knob("veo_resolution", "Resolution")
-    res_knob.setValue(resolution)
-    res_knob.setFlag(nuke.INVISIBLE)
-    record_node.addKnob(res_knob)
+        if "frame_mode" in read_node.knobs():
+            try:
+                link = nuke.Link_Knob("frame_mode")
+                link.makeLink(read_full, "frame_mode")
+                link.setLabel("frame mode")
+                link.setFlag(nuke.STARTLINE)
+                group.addKnob(link)
+            except Exception:
+                pass
+        if "frame" in read_node.knobs():
+            try:
+                link = nuke.Link_Knob("frame")
+                link.makeLink(read_full, "frame")
+                link.setLabel("frame")
+                link.clearFlag(nuke.STARTLINE)
+                group.addKnob(link)
+            except Exception:
+                pass
 
-    mode_knob = nuke.String_Knob("veo_mode", "Mode")
-    mode_knob.setValue(mode)
-    mode_knob.setFlag(nuke.INVISIBLE)
-    record_node.addKnob(mode_knob)
+        if "origfirst" in read_node.knobs():
+            try:
+                link = nuke.Link_Knob("origfirst")
+                link.makeLink(read_full, "origfirst")
+                link.setLabel("origfirst")
+                link.setFlag(nuke.STARTLINE)
+                group.addKnob(link)
+            except Exception:
+                pass
+        if "origlast" in read_node.knobs():
+            try:
+                link = nuke.Link_Knob("origlast")
+                link.makeLink(read_full, "origlast")
+                link.setLabel("origlast")
+                link.clearFlag(nuke.STARTLINE)
+                group.addKnob(link)
+            except Exception:
+                pass
 
-    neg_prompt_knob = nuke.Multiline_Eval_String_Knob("veo_neg_prompt", "Negative Prompt")
-    neg_prompt_knob.setValue(negative_prompt)
-    neg_prompt_knob.setFlag(nuke.INVISIBLE)
-    record_node.addKnob(neg_prompt_knob)
+        # --- on_error ---
+        if "on_error" in read_node.knobs():
+            try:
+                link = nuke.Link_Knob("on_error")
+                link.makeLink(read_full, "on_error")
+                link.setLabel("missing frames")
+                link.setFlag(nuke.STARTLINE)
+                group.addKnob(link)
+            except Exception:
+                pass
 
-    # Output video path (hidden)
-    output_knob = nuke.File_Knob("veo_output_path", "Output Video")
-    output_knob.setValue(output_video_path.replace("\\", "/") if output_video_path else "")
-    output_knob.setFlag(nuke.INVISIBLE)
-    record_node.addKnob(output_knob)
+        # --- colorspace, premultiplied, raw, auto_alpha ---
+        if "colorspace" in read_node.knobs():
+            try:
+                link = nuke.Link_Knob("colorspace")
+                link.makeLink(read_full, "colorspace")
+                link.setLabel(read_node["colorspace"].label() or "colorspace")
+                link.setFlag(nuke.STARTLINE)
+                group.addKnob(link)
+            except Exception:
+                pass
+        for kname in ["premultiplied", "raw", "auto_alpha"]:
+            if kname in read_node.knobs():
+                try:
+                    link = nuke.Link_Knob(kname)
+                    link.makeLink(read_full, kname)
+                    link.setLabel(read_node[kname].label() or kname)
+                    link.clearFlag(nuke.STARTLINE)
+                    group.addKnob(link)
+                except Exception:
+                    pass
 
-    # Store input image paths (hidden)
-    input_data = {
-        "reference_images": reference_image_paths or [],
-    }
-    inputs_knob = nuke.String_Knob("veo_input_images", "Input Images (JSON)")
-    inputs_knob.setValue(json.dumps(input_data))
-    inputs_knob.setFlag(nuke.INVISIBLE)
-    record_node.addKnob(inputs_knob)
+        # --- MOV Options section ---
+        mov_knob_names = [
+            "ycbcr_matrix", "mov_data_range",
+            "first_track_only", "metadata", "noprefix", "match_key_format",
+            "mov64_decode_codec", "mov_decode_codec",
+            "video_codec_knob",
+        ]
+        mov_divider_added = False
+        for kname in mov_knob_names:
+            if kname in read_node.knobs():
+                if not mov_divider_added:
+                    mov_div = nuke.Text_Knob("mov_divider", "MOV Options")
+                    group.addKnob(mov_div)
+                    mov_divider_added = True
+                try:
+                    link = nuke.Link_Knob(kname)
+                    link.makeLink(read_full, kname)
+                    link.setLabel(read_node[kname].label() or kname)
+                    group.addKnob(link)
+                except Exception:
+                    pass
 
-    # Add PyCustom_Knob for regenerate UI
-    divider = nuke.Text_Knob("divider1", "")
-    record_node.addKnob(divider)
+        if mov_divider_added:
+            try:
+                codec_val = ""
+                if "video_codec_knob" in read_node.knobs():
+                    codec_val = read_node["video_codec_knob"].value()
+                elif "mov64_decode_codec" in read_node.knobs():
+                    codec_val = read_node["mov64_decode_codec"].value()
+                if codec_val:
+                    codec_text = nuke.Text_Knob("video_codec_display", "Video Codec", str(codec_val))
+                    group.addKnob(codec_text)
+            except Exception:
+                pass
 
-    custom_knob = nuke.PyCustom_Knob(
-        "veo_record_ui", "",
-        "ai_workflow.veo.VeoRecordKnobWidget(nuke.thisNode())"
-    )
-    custom_knob.setFlag(nuke.STARTLINE)
-    record_node.addKnob(custom_knob)
-
-    # Create VEO Player node (Group wrapping Read) for output video
-    read_node = None
-    player_node = None
-    if output_video_path and os.path.exists(output_video_path):
-        player_node, read_node = create_veo_player_node(
-            video_path=output_video_path,
-            name="生成图像sp{}".format(record_num),
-            xpos=rec_x + 200,
-            ypos=rec_y,
+        # --- Open Full Read Properties button ---
+        open_read_script = (
+            "n = nuke.thisNode()\n"
+            "n.begin()\n"
+            "r = nuke.toNode('InternalRead')\n"
+            "n.end()\n"
+            "if r: nuke.show(r)"
         )
+        open_btn = nuke.PyScript_Knob("open_read_props", "Open Full Read Properties", open_read_script)
+        open_btn.setFlag(nuke.STARTLINE)
+        group.addKnob(open_btn)
 
-        read_ref_knob = nuke.String_Knob("veo_read_node", "Read Node")
-        read_ref_knob.setValue(player_node.name())
-        read_ref_knob.setFlag(nuke.INVISIBLE)
-        record_node.addKnob(read_ref_knob)
+        # --- knobChanged callback to sync veo_file → internal Read's file ---
+        kc_script = (
+            "n = nuke.thisNode()\n"
+            "k = nuke.thisKnob()\n"
+            "if k.name() == 'veo_file':\n"
+            "    n.begin()\n"
+            "    r = nuke.toNode('InternalRead')\n"
+            "    n.end()\n"
+            "    if r:\n"
+            "        r['file'].fromUserText(k.value())\n"
+        )
+        group["knobChanged"].setValue(kc_script)
 
-        # Player's input 0 connects to record node (SP → Player direction)
-        player_node.setInput(0, record_node)
+        # --- Divider + Send to Studio button ---
+        divider = nuke.Text_Knob("studio_divider", "")
+        group.addKnob(divider)
 
-        print("VEO: Created VEO Player '{}' for video: {}".format(
-            player_node.name(), output_video_path))
-    else:
-        read_ref_knob = nuke.String_Knob("veo_read_node", "Read Node")
-        read_ref_knob.setValue("")
-        read_ref_knob.setFlag(nuke.INVISIBLE)
-        record_node.addKnob(read_ref_knob)
+        btn = nuke.PyScript_Knob("send_to_studio", "Send to Studio", _VEO_PLAYER_SEND_SCRIPT)
+        btn.setFlag(nuke.STARTLINE)
+        group.addKnob(btn)
 
-    return record_node, player_node
+        # ==============================================================
+        # Tab 2: Regenerate  (generation record + editable regeneration UI)
+        # ==============================================================
+        tab_regen = nuke.Tab_Knob("veo_regen_tab", "Regenerate")
+        group.addKnob(tab_regen)
+
+        # --- Hidden knobs storing generation parameters ---
+        gen_knob = nuke.String_Knob("veo_generator", "Generator")
+        gen_knob.setValue(gen_name)
+        gen_knob.setFlag(nuke.INVISIBLE)
+        group.addKnob(gen_knob)
+
+        prompt_knob = nuke.Multiline_Eval_String_Knob("veo_prompt", "Prompt")
+        prompt_knob.setValue(prompt)
+        prompt_knob.setFlag(nuke.INVISIBLE)
+        group.addKnob(prompt_knob)
+
+        ratio_knob = nuke.String_Knob("veo_ratio", "Aspect Ratio")
+        ratio_knob.setValue(aspect_ratio)
+        ratio_knob.setFlag(nuke.INVISIBLE)
+        group.addKnob(ratio_knob)
+
+        dur_knob = nuke.String_Knob("veo_duration", "Duration")
+        dur_knob.setValue(duration if duration else "8")
+        dur_knob.setFlag(nuke.INVISIBLE)
+        group.addKnob(dur_knob)
+
+        model_knob = nuke.String_Knob("veo_model", "Model")
+        model_knob.setValue(model)
+        model_knob.setFlag(nuke.INVISIBLE)
+        group.addKnob(model_knob)
+
+        res_knob = nuke.String_Knob("veo_resolution", "Resolution")
+        res_knob.setValue(resolution)
+        res_knob.setFlag(nuke.INVISIBLE)
+        group.addKnob(res_knob)
+
+        mode_knob = nuke.String_Knob("veo_mode", "Mode")
+        mode_knob.setValue(mode)
+        mode_knob.setFlag(nuke.INVISIBLE)
+        group.addKnob(mode_knob)
+
+        neg_prompt_knob = nuke.Multiline_Eval_String_Knob("veo_neg_prompt", "Negative Prompt")
+        neg_prompt_knob.setValue(negative_prompt)
+        neg_prompt_knob.setFlag(nuke.INVISIBLE)
+        group.addKnob(neg_prompt_knob)
+
+        output_knob = nuke.File_Knob("veo_output_path", "Output Video")
+        output_knob.setValue(output_video_path.replace("\\", "/") if output_video_path else "")
+        output_knob.setFlag(nuke.INVISIBLE)
+        group.addKnob(output_knob)
+
+        input_data = {
+            "reference_images": reference_image_paths or [],
+        }
+        inputs_knob = nuke.Multiline_Eval_String_Knob("veo_input_images", "Input Images (JSON)")
+        inputs_knob.setFlag(nuke.INVISIBLE)
+        group.addKnob(inputs_knob)
+        inputs_knob.setValue(json.dumps(input_data))
+
+        # --- PyCustom_Knob for regenerate UI ---
+        regen_divider = nuke.Text_Knob("regen_divider", "")
+        group.addKnob(regen_divider)
+
+        custom_knob = nuke.PyCustom_Knob(
+            "veo_regen_ui", "",
+            "ai_workflow.veo.VeoViewerRegenWidget()"
+        )
+        custom_knob.setFlag(nuke.STARTLINE)
+        group.addKnob(custom_knob)
+
+        # --- Hidden marker knob to identify VEO Viewer nodes ---
+        marker = nuke.Boolean_Knob("is_veo_viewer", "")
+        marker.setValue(True)
+        marker.setFlag(nuke.INVISIBLE)
+        group.addKnob(marker)
+
+        print("VEO: Created VEO Viewer '{}' with internal Read for: {}".format(
+            group.name(), output_video_path))
+        return group, read_node
+    finally:
+        nuke.Undo.end()
 
 
-def update_record_read_node(record_node, new_video_path):
-    """Update the VEO Player (or legacy Read) node associated with a video record node.
-    If the node doesn't exist, create a new VEO Player."""
-    player_node = None
-    player_node_name = ""
+def create_veo_viewer_standalone(xpos=None, ypos=None):
+    """Manually create an empty VEO Viewer node (no generator, no video).
 
-    if "veo_read_node" in record_node.knobs():
-        player_node_name = record_node["veo_read_node"].value()
-        if player_node_name:
-            player_node = nuke.toNode(player_node_name)
+    Called from the toolbar menu for standalone testing / manual usage.
+    Mirrors NanoBanana's ``create_nb_player_node(xpos, ypos)`` pattern.
 
-    if player_node:
-        # Check if it's a VEO Player Group or a legacy Read node
-        internal_read = _get_internal_read(player_node)
+    Returns:
+        (viewer_group, internal_read_node)
+    """
+    nuke.Undo.begin("Create VEO Viewer")
+    try:
+        group = nuke.nodes.Group()
+        group.setName(_next_veo_viewer_name())
+        group["tile_color"].setValue(0x2E2E2EFF)  # Dark grey (same as Nano Viewer)
+
+        if xpos is not None:
+            group["xpos"].setValue(int(xpos))
+        if ypos is not None:
+            group["ypos"].setValue(int(ypos))
+
+        # --- Build internals: Read → Output ---
+        group.begin()
+        read_node = nuke.nodes.Read(name="InternalRead")
+        out_node = nuke.nodes.Output(name="Output")
+        out_node.setInput(0, read_node)
+        group.end()
+
+        # ==============================================================
+        # Tab 1: Read
+        # ==============================================================
+        read_full = read_node.fullName()
+
+        tab_read = nuke.Tab_Knob("read_tab", "Read")
+        group.addKnob(tab_read)
+
+        # --- file knob ---
+        file_knob = nuke.File_Knob("veo_file", "file")
+        group.addKnob(file_knob)
+
+        # --- format ---
+        try:
+            link_format = nuke.Link_Knob("format")
+            link_format.makeLink(read_full, "format")
+            link_format.setLabel("format")
+            group.addKnob(link_format)
+        except Exception:
+            pass
+
+        # --- frame range knobs ---
+        for kn_name, kn_label, start in [
+            ("first", "first", True), ("last", "last", False),
+            ("frame_mode", "frame mode", True), ("frame", "frame", False),
+            ("origfirst", "origfirst", True), ("origlast", "origlast", False),
+        ]:
+            if kn_name in read_node.knobs():
+                try:
+                    link = nuke.Link_Knob(kn_name)
+                    link.makeLink(read_full, kn_name)
+                    link.setLabel(kn_label)
+                    if start:
+                        link.setFlag(nuke.STARTLINE)
+                    else:
+                        link.clearFlag(nuke.STARTLINE)
+                    group.addKnob(link)
+                except Exception:
+                    pass
+
+        # --- on_error ---
+        if "on_error" in read_node.knobs():
+            try:
+                link = nuke.Link_Knob("on_error")
+                link.makeLink(read_full, "on_error")
+                link.setLabel("missing frames")
+                link.setFlag(nuke.STARTLINE)
+                group.addKnob(link)
+            except Exception:
+                pass
+
+        # --- colorspace, premultiplied, raw, auto_alpha ---
+        if "colorspace" in read_node.knobs():
+            try:
+                link = nuke.Link_Knob("colorspace")
+                link.makeLink(read_full, "colorspace")
+                link.setLabel(read_node["colorspace"].label() or "colorspace")
+                link.setFlag(nuke.STARTLINE)
+                group.addKnob(link)
+            except Exception:
+                pass
+        for kname in ["premultiplied", "raw", "auto_alpha"]:
+            if kname in read_node.knobs():
+                try:
+                    link = nuke.Link_Knob(kname)
+                    link.makeLink(read_full, kname)
+                    link.setLabel(read_node[kname].label() or kname)
+                    link.clearFlag(nuke.STARTLINE)
+                    group.addKnob(link)
+                except Exception:
+                    pass
+
+        # --- Open Full Read Properties button ---
+        open_read_script = (
+            "n = nuke.thisNode()\n"
+            "n.begin()\n"
+            "r = nuke.toNode('InternalRead')\n"
+            "n.end()\n"
+            "if r: nuke.show(r)"
+        )
+        open_btn = nuke.PyScript_Knob("open_read_props", "Open Full Read Properties", open_read_script)
+        open_btn.setFlag(nuke.STARTLINE)
+        group.addKnob(open_btn)
+
+        # --- knobChanged callback to sync veo_file → internal Read's file ---
+        kc_script = (
+            "n = nuke.thisNode()\n"
+            "k = nuke.thisKnob()\n"
+            "if k.name() == 'veo_file':\n"
+            "    n.begin()\n"
+            "    r = nuke.toNode('InternalRead')\n"
+            "    n.end()\n"
+            "    if r:\n"
+            "        r['file'].fromUserText(k.value())\n"
+        )
+        group["knobChanged"].setValue(kc_script)
+
+        # --- Divider + Send to Studio button ---
+        divider = nuke.Text_Knob("studio_divider", "")
+        group.addKnob(divider)
+
+        btn = nuke.PyScript_Knob("send_to_studio", "Send to Studio", _VEO_PLAYER_SEND_SCRIPT)
+        btn.setFlag(nuke.STARTLINE)
+        group.addKnob(btn)
+
+        # ==============================================================
+        # Tab 2: Regenerate  (empty – no generation parameters for standalone)
+        # ==============================================================
+        tab_regen = nuke.Tab_Knob("veo_regen_tab", "Regenerate")
+        group.addKnob(tab_regen)
+
+        # Hidden knobs with empty defaults (so the widget and other code doesn't crash)
+        for kn_name, kn_cls, default in [
+            ("veo_generator", nuke.String_Knob, ""),
+            ("veo_prompt", nuke.Multiline_Eval_String_Knob, ""),
+            ("veo_ratio", nuke.String_Knob, "16:9"),
+            ("veo_duration", nuke.String_Knob, "8"),
+            ("veo_model", nuke.String_Knob, ""),
+            ("veo_resolution", nuke.String_Knob, "720P"),
+            ("veo_mode", nuke.String_Knob, "Text"),
+            ("veo_neg_prompt", nuke.Multiline_Eval_String_Knob, ""),
+        ]:
+            k = kn_cls(kn_name, kn_name.replace("veo_", "").replace("_", " ").title())
+            k.setValue(default)
+            k.setFlag(nuke.INVISIBLE)
+            group.addKnob(k)
+
+        output_knob = nuke.File_Knob("veo_output_path", "Output Video")
+        output_knob.setValue("")
+        output_knob.setFlag(nuke.INVISIBLE)
+        group.addKnob(output_knob)
+
+        inputs_knob = nuke.Multiline_Eval_String_Knob("veo_input_images", "Input Images (JSON)")
+        inputs_knob.setFlag(nuke.INVISIBLE)
+        group.addKnob(inputs_knob)
+        inputs_knob.setValue(json.dumps({"reference_images": []}))
+
+        # --- PyCustom_Knob for regenerate UI ---
+        regen_divider = nuke.Text_Knob("regen_divider", "")
+        group.addKnob(regen_divider)
+
+        custom_knob = nuke.PyCustom_Knob(
+            "veo_regen_ui", "",
+            "ai_workflow.veo.VeoViewerRegenWidget()"
+        )
+        custom_knob.setFlag(nuke.STARTLINE)
+        group.addKnob(custom_knob)
+
+        # --- Hidden marker ---
+        marker = nuke.Boolean_Knob("is_veo_viewer", "")
+        marker.setValue(True)
+        marker.setFlag(nuke.INVISIBLE)
+        group.addKnob(marker)
+
+        print("VEO: Created standalone VEO Viewer '{}'".format(group.name()))
+        return group, read_node
+    finally:
+        nuke.Undo.end()
+
+
+def update_veo_viewer_read(viewer_node, new_video_path):
+    """Update the internal Read node of a VEO Viewer with a new video path.
+    If the viewer node doesn't exist or is invalid, create a new VEO Viewer."""
+    if viewer_node is not None:
+        internal_read = _get_internal_read(viewer_node)
         if internal_read:
-            # It's a VEO Player Group — update the internal Read
             internal_read["file"].fromUserText(new_video_path)
-            # Also sync the Group's veo_file knob
-            if "veo_file" in player_node.knobs():
-                player_node["veo_file"].setValue(new_video_path.replace("\\", "/"))
-        elif player_node.Class() == "Read":
-            # Legacy Read node — update directly
-            player_node["file"].fromUserText(new_video_path)
-        record_node["veo_output_path"].setValue(new_video_path.replace("\\", "/"))
-        return player_node
-
-    # Node not found — create a new VEO Player
-    rec_x = int(record_node["xpos"].value())
-    rec_y = int(record_node["ypos"].value())
-
-    player_node, read_node = create_veo_player_node(
-        video_path=new_video_path,
-        name="regenerated_video",
-        xpos=rec_x + 200,
-        ypos=rec_y,
-    )
-
-    # Store new node reference
-    if "veo_read_node" in record_node.knobs():
-        record_node["veo_read_node"].setValue(player_node.name())
-    else:
-        read_ref_knob = nuke.String_Knob("veo_read_node", "Read Node")
-        read_ref_knob.setValue(player_node.name())
-        record_node.addKnob(read_ref_knob)
-
-    if "veo_output_path" in record_node.knobs():
-        record_node["veo_output_path"].setValue(new_video_path.replace("\\", "/"))
-
-    # Player's input 0 connects to record node (SP → Player direction)
-    player_node.setInput(0, record_node)
-
-    print("VEO: Created new VEO Player '{}' for regenerated video: {}".format(
-        player_node.name(), new_video_path))
-    return player_node
+            if "veo_file" in viewer_node.knobs():
+                viewer_node["veo_file"].setValue(new_video_path.replace("\\", "/"))
+        if "veo_output_path" in viewer_node.knobs():
+            viewer_node["veo_output_path"].setValue(new_video_path.replace("\\", "/"))
+        return viewer_node
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1709,7 +2051,7 @@ class VeoWidget(QtWidgets.QWidget):
 
                 def _create_nodes():
                     try:
-                        record_node, read_node = create_video_record_node(
+                        viewer_node, internal_read = create_veo_viewer_node(
                             params["generator_node"],
                             params["prompt"],
                             params["ratio"],
@@ -1721,9 +2063,9 @@ class VeoWidget(QtWidgets.QWidget):
                             mode=params.get("mode", VEO_MODE_TEXT),
                             negative_prompt=params.get("negative_prompt", ""),
                         )
-                        if read_node:
+                        if viewer_node:
                             try:
-                                nuke.connectViewer(0, read_node)
+                                nuke.connectViewer(0, viewer_node)
                             except:
                                 pass
                     except Exception as e:
@@ -2483,3 +2825,37 @@ class VeoRecordKnobWidget(QtWidgets.QWidget):
 
     def updateValue(self):
         pass
+
+
+class VeoViewerRegenWidget(QtWidgets.QWidget):
+    """Wrapper for VEO Viewer node's Regenerate tab (PyCustom_Knob).
+
+    Re-uses VeoRecordWidget which provides:
+      - Top: read-only record of original generation parameters
+      - Bottom: editable parameters + REGENERATE button
+    For a standalone (manually created) viewer the record section will
+    simply be empty until a generation populates the knobs.
+    """
+
+    def __init__(self):
+        super(VeoViewerRegenWidget, self).__init__()
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        try:
+            self.node = nuke.thisNode()
+        except Exception:
+            self.node = None
+
+        self.panel = VeoRecordWidget(self.node, parent=self)
+        layout.addWidget(self.panel)
+
+    def makeUI(self):
+        return self
+
+    def updateValue(self):
+        try:
+            if hasattr(self, 'panel') and hasattr(self.panel, '_save_state_to_node'):
+                self.panel._save_state_to_node()
+        except Exception:
+            pass
