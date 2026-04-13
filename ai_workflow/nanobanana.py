@@ -36,6 +36,7 @@ import time
 import random
 import base64
 import datetime
+import re
 
 
 class _DropDownComboBox(QtWidgets.QComboBox):
@@ -590,17 +591,47 @@ def get_output_directory():
     return output_dir
 
 
+def _is_generator_node(node):
+    """Return True if *node* is a NanoBanana Generate node (not a Player/Prompt)."""
+    name = node.name()
+    # Match "NanoBanana", "NanoBanana1", "NanoBanana2", ... AND legacy "NanoBanana_Generate*"
+    # But NOT "Nano_Viewer*" (player nodes)
+    if name.startswith("NanoBanana_Generate"):
+        return True
+    if name == "NanoBanana" or re.match(r"^NanoBanana\d+$", name):
+        return True
+    return False
+
+def _next_node_name(prefix):
+    """Return the next available name like 'Prefix1', 'Prefix2', etc.
+    Checks all existing nodes and picks the lowest unused number."""
+    import re
+    used = set()
+    for node in nuke.allNodes():
+        n = node.name()
+        if n == prefix:
+            used.add(1)
+        else:
+            m = re.match(r"^{}(\d+)$".format(re.escape(prefix)), n)
+            if m:
+                used.add(int(m.group(1)))
+    # Find the lowest unused positive integer
+    i = 1
+    while i in used:
+        i += 1
+    return "{}{}".format(prefix, i)
+
 def get_nanobanana_node():
     """Try to find the NanoBanana_Generate node."""
     # First check if there's a selected node
     selected = nuke.selectedNodes()
     for node in selected:
-        if node.name().startswith("NanoBanana_Generate"):
+        if _is_generator_node(node):
             return node
     
     # Search all nodes for NanoBanana_Generate
     for node in nuke.allNodes():
-        if node.name().startswith("NanoBanana_Generate"):
+        if _is_generator_node(node):
             return node
     return None
 
@@ -962,7 +993,7 @@ def create_nb_player_node(image_path=None, name=None, xpos=None, ypos=None,
     # subsequent rename-undo cannot partially break internal structure
     nuke.Undo.begin("Create Nano Viewer")
     try:
-        _default_name = "Nano_Viewer1"
+        _default_name = _next_node_name("Nano_Viewer")
         group = nuke.nodes.Group(name=(name or _default_name))
 
         if xpos is not None:
@@ -971,7 +1002,7 @@ def create_nb_player_node(image_path=None, name=None, xpos=None, ypos=None,
             group["ypos"].setValue(int(ypos))
 
         # Green colour (same as VEO Player)
-        group["tile_color"].setValue(0x00C878FF)
+        group["tile_color"].setValue(0x2E2E2EFF)
         # No label — keep the node name clean in the DAG
 
         # --- Build internals: Read → Output ---
@@ -2521,7 +2552,7 @@ def _find_generator_for_player(player_node):
             visited.add(name)
 
             if hasattr(cur, "name") and isinstance(cur.name(), str) and \
-               cur.name().startswith("NanoBanana_Generate"):
+               _is_generator_node(cur):
                 return cur.name()
 
             max_inputs = getattr(cur, "inputs", lambda: 0)()
@@ -3103,8 +3134,8 @@ def create_nanobanana_node():
     # Always start with 1 input; if node selected, connect it to img1 after creation
     initial_inputs = 1
 
-    group_node = nuke.nodes.Group(name="NanoBanana_Generate")
-    group_node["tile_color"].setValue(0x3CB371FF)  # Green
+    group_node = nuke.nodes.Group(name=_next_node_name("NanoBanana"))
+    group_node["tile_color"].setValue(0x2E2E2EFF)
 
     # Position below selected node, or at DAG viewport center
     if sel_node:
