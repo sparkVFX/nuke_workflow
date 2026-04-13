@@ -865,6 +865,29 @@ def create_veo_player_node(video_path=None, name=None, xpos=None, ypos=None):
             "    n.begin()\n"
             "    r['file'].fromUserText(k.value())\n"
             "    n.end()\n"
+            "    # Pull fresh format from Read\n"
+            "    try:\n"
+            "        _fv = r['format'].value()\n"
+            "        _fmt_name = ''\n"
+            "        if hasattr(_fv, 'name') and _fv.name():\n"
+            "            _fmt_name = _fv.name()\n"
+            "        elif hasattr(_fv, 'width') and _fv.width() > 0:\n"
+            "            _fmt_name = '%dx%d' % (_fv.width(), _fv.height())\n"
+            "        if _fmt_name and 'veo_format' in n.knobs():\n"
+            "            _cur_vals = list(n['veo_format'].values())\n"
+            "            if _fmt_name not in _cur_vals:\n"
+            "                _cur_vals.append(_fmt_name)\n"
+            "                n['veo_format'].setValues(_cur_vals)\n"
+            "            n['veo_format'].setValue(_fmt_name)\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "    # Pull fresh frame range from Read\n"
+            "    for _frk, _fgk in [('first','veo_first'),('last','veo_last'),('origfirst','veo_origfirst'),('origlast','veo_origlast')]:\n"
+            "        try:\n"
+            "            if _frk in r.knobs() and _fgk in n.knobs():\n"
+            "                n[_fgk].setValue(int(r[_frk].value()))\n"
+            "        except Exception:\n"
+            "            pass\n"
             "    # Pull fresh colorspace from Read\n"
             "    try:\n"
             "        _cv = str(r['colorspace'].value())\n"
@@ -1291,6 +1314,29 @@ def create_veo_viewer_node(generator_node, prompt, aspect_ratio, duration,
             "    n.begin()\n"
             "    r['file'].fromUserText(k.value())\n"
             "    n.end()\n"
+            "    # Pull fresh format from Read\n"
+            "    try:\n"
+            "        _fv = r['format'].value()\n"
+            "        _fmt_name = ''\n"
+            "        if hasattr(_fv, 'name') and _fv.name():\n"
+            "            _fmt_name = _fv.name()\n"
+            "        elif hasattr(_fv, 'width') and _fv.width() > 0:\n"
+            "            _fmt_name = '%dx%d' % (_fv.width(), _fv.height())\n"
+            "        if _fmt_name and 'veo_format' in n.knobs():\n"
+            "            _cur_vals = list(n['veo_format'].values())\n"
+            "            if _fmt_name not in _cur_vals:\n"
+            "                _cur_vals.append(_fmt_name)\n"
+            "                n['veo_format'].setValues(_cur_vals)\n"
+            "            n['veo_format'].setValue(_fmt_name)\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "    # Pull fresh frame range from Read\n"
+            "    for _frk, _fgk in [('first','veo_first'),('last','veo_last'),('origfirst','veo_origfirst'),('origlast','veo_origlast')]:\n"
+            "        try:\n"
+            "            if _frk in r.knobs() and _fgk in n.knobs():\n"
+            "                n[_fgk].setValue(int(r[_frk].value()))\n"
+            "        except Exception:\n"
+            "            pass\n"
             "    # Pull fresh colorspace from Read\n"
             "    try:\n"
             "        _cv = str(r['colorspace'].value())\n"
@@ -1680,6 +1726,29 @@ def create_veo_viewer_standalone(xpos=None, ypos=None):
             "    n.begin()\n"
             "    r['file'].fromUserText(k.value())\n"
             "    n.end()\n"
+            "    # Pull fresh format from Read\n"
+            "    try:\n"
+            "        _fv = r['format'].value()\n"
+            "        _fmt_name = ''\n"
+            "        if hasattr(_fv, 'name') and _fv.name():\n"
+            "            _fmt_name = _fv.name()\n"
+            "        elif hasattr(_fv, 'width') and _fv.width() > 0:\n"
+            "            _fmt_name = '%dx%d' % (_fv.width(), _fv.height())\n"
+            "        if _fmt_name and 'veo_format' in n.knobs():\n"
+            "            _cur_vals = list(n['veo_format'].values())\n"
+            "            if _fmt_name not in _cur_vals:\n"
+            "                _cur_vals.append(_fmt_name)\n"
+            "                n['veo_format'].setValues(_cur_vals)\n"
+            "            n['veo_format'].setValue(_fmt_name)\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "    # Pull fresh frame range from Read\n"
+            "    for _frk, _fgk in [('first','veo_first'),('last','veo_last'),('origfirst','veo_origfirst'),('origlast','veo_origlast')]:\n"
+            "        try:\n"
+            "            if _frk in r.knobs() and _fgk in n.knobs():\n"
+            "                n[_fgk].setValue(int(r[_frk].value()))\n"
+            "        except Exception:\n"
+            "            pass\n"
             "    # Pull fresh colorspace from Read\n"
             "    try:\n"
             "        _cv = str(r['colorspace'].value())\n"
@@ -1789,6 +1858,37 @@ def update_veo_viewer_read(viewer_node, new_video_path):
             internal_read["file"].fromUserText(new_video_path)
             if "veo_file" in viewer_node.knobs():
                 viewer_node["veo_file"].setValue(new_video_path.replace("\\", "/"))
+            # Sync format from Read to Group
+            try:
+                _fv = internal_read["format"].value()
+                _fmt_name = ""
+                if hasattr(_fv, "name") and _fv.name():
+                    _fmt_name = _fv.name()
+                elif hasattr(_fv, "width") and _fv.width() > 0:
+                    _fmt_name = "%dx%d" % (_fv.width(), _fv.height())
+                if _fmt_name and "veo_format" in viewer_node.knobs():
+                    _cur_vals = list(viewer_node["veo_format"].values())
+                    if _fmt_name not in _cur_vals:
+                        _cur_vals.append(_fmt_name)
+                        viewer_node["veo_format"].setValues(_cur_vals)
+                    viewer_node["veo_format"].setValue(_fmt_name)
+            except Exception:
+                pass
+            # Sync frame range from Read to Group
+            for _rk, _gk in [("first", "veo_first"), ("last", "veo_last"),
+                              ("origfirst", "veo_origfirst"), ("origlast", "veo_origlast")]:
+                try:
+                    if _rk in internal_read.knobs() and _gk in viewer_node.knobs():
+                        viewer_node[_gk].setValue(int(internal_read[_rk].value()))
+                except Exception:
+                    pass
+            # Sync colorspace from Read to Group
+            try:
+                if "colorspace" in internal_read.knobs() and "veo_colorspace" in viewer_node.knobs():
+                    _cv = str(internal_read["colorspace"].value())
+                    viewer_node["veo_colorspace"].setValue(_cv)
+            except Exception:
+                pass
         if "veo_output_path" in viewer_node.knobs():
             viewer_node["veo_output_path"].setValue(new_video_path.replace("\\", "/"))
         return viewer_node
