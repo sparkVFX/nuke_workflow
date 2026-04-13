@@ -4,6 +4,8 @@ Creates a toolbar button in Nuke's left panel with 5 sub-buttons.
 """
 
 import nuke
+import os
+import tempfile
 
 
 def create_node_generate_image_midjourney():
@@ -58,8 +60,115 @@ def open_settings():
     dialog.exec_()
 
 
+def _render_node_output(node, render_all_frames=False):
+    """Render a node's output to a temporary file.
+
+    For images or single-frame: renders as PNG.
+    For video with render_all_frames=True: renders full frame range as MOV.
+    For video with render_all_frames=False: renders current frame as PNG.
+
+    Args:
+        node: The Nuke node to render.
+        render_all_frames: If True, render the entire frame range as video.
+                           If False, render only the current frame.
+
+    Returns:
+        File path of the rendered temp file, or None on failure.
+    """
+    from ai_workflow.nanobanana import render_input_to_file_silent
+
+    # Determine temp directory (use settings if available)
+    try:
+        from ai_workflow.nanobanana import _get_temp_dir
+        temp_dir = _get_temp_dir()
+    except Exception:
+        temp_dir = tempfile.gettempdir()
+
+    # Determine frame range
+    first_frame = nuke.frame()
+    last_frame = first_frame
+
+    # Try to detect frame range from upstream Read/Group
+    is_video = False
+    try:
+        _up = node
+        for _depth in range(20):  # walk up to 20 nodes looking for a Read
+            if _up is None:
+                break
+            if _up.Class() == "Read":
+                _f = int(_up["first"].value()) if "first" in _up.knobs() else first_frame
+                _l = int(_up["last"].value()) if "last" in _up.knobs() else last_frame
+                if _l > _f:
+                    is_video = True
+                    first_frame = _f
+                    last_frame = _l
+                break
+            elif _up.Class() == "Group":
+                try:
+                    _up.begin()
+                    _inner_read = nuke.toNode("InternalRead")
+                    _up.end()
+                    if _inner_read:
+                        _f = int(_inner_read["first"].value()) if "first" in _inner_read.knobs() else first_frame
+                        _l = int(_inner_read["last"].value()) if "last" in _inner_read.knobs() else last_frame
+                        if _l > _f:
+                            is_video = True
+                            first_frame = _f
+                            last_frame = _l
+                        break
+                except Exception:
+                    pass
+            _up = _up.input(0)
+    except Exception:
+        pass
+
+    node_name = node.name()
+
+    if is_video and render_all_frames:
+        # Render full range as MOV
+        import time
+        ext = "mov"
+        filename = "{}_{}_{}".format(node_name, "allframes", int(time.time()))
+        output_path = os.path.join(temp_dir, filename + "." + ext)
+
+        try:
+            write = nuke.nodes.Write()
+            write.setInput(0, node)
+            write["file"].setValue(output_path.replace("\\", "/"))
+            write["file_type"].setValue("mov")
+            write["channels"].setValue("rgba")
+            # Hide Write node
+            write["xpos"].setValue(-10000)
+            write["ypos"].setValue(-10000)
+
+            nuke.execute(write, first_frame, last_frame)
+            nuke.delete(write)
+
+            if os.path.exists(output_path):
+                return output_path
+        except Exception as e:
+            print("[SendToSequence] Error rendering video: {}".format(e))
+            try:
+                nuke.delete(write)
+            except Exception:
+                pass
+        return None
+    else:
+        # Render single frame as PNG
+        filename = "{}_frame{}_{}".format(node_name, first_frame, __import__("time").time())
+        output_path = os.path.join(temp_dir, filename + ".png")
+
+        if render_input_to_file_silent(node, output_path, first_frame):
+            return output_path
+        return None
+
+
 def _extract_clip_info(node):
-    """Extract clip info from a Read node or a Player Group node (VEO/NB Player)."""
+    """Extract clip info from a Read node or a Player Group node (VEO/NB Player).
+
+    For other node types (e.g. ColorCorrect, Grade), returns None so that
+    send_selected_to_studio can fall back to rendering.
+    """
     if node.Class() == "Read":
         file_path = node["file"].value()
         if file_path:
@@ -76,28 +185,74 @@ def _extract_clip_info(node):
                     return {"file": file_path, "name": node.name()}
         except Exception:
             pass
+    # Other node types (ColorCorrect, Grade, etc.) → return None,
+    # caller will handle via _render_node_output()
     return None
 
 
 def send_selected_to_studio():
-    """Send the selected Read/Player node(s) to Nuke Studio via socket."""
+    """Send the selected node(s) to Nuke Studio via socket.
+
+    Supports:
+    - Read / Player Group nodes: sends original file path directly.
+    - Any other node (e.g. ColorCorrect): renders output to temp file, then sends.
+    """
     import socket
     import json
     import struct
 
     selected = nuke.selectedNodes()
     if not selected:
-        nuke.message("Please select one or more Read or Player nodes first.")
+        nuke.message("Please select one or more nodes first.")
         return
+
+    # Check if any selected node needs rendering (non-Read, non-Player)
+    has_render_nodes = False
+    has_direct_nodes = False
+    for node in selected:
+        info = _extract_clip_info(node)
+        if info:
+            has_direct_nodes = True
+        else:
+            has_render_nodes = True
+
+    # Ask user about render mode only when there are nodes that need rendering
+    render_all = False
+    if has_render_nodes:
+        if has_direct_nodes:
+            # Mixed selection: direct + render nodes
+            choice = nuke.ask(
+                "Selection contains both media nodes and processing nodes.\n\n"
+                "Processing nodes (ColorCorrect, etc.) need to be rendered.\n\n"
+                "Click OK to render CURRENT FRAME only.\n"
+                "Click Cancel to render FULL FRAME RANGE (video)."
+            )
+            if choice is None:
+                render_all = True  # Cancel → render all frames
+            # OK → render_all stays False (current frame only)
+        else:
+            # All nodes need rendering
+            choice = nuke.ask(
+                "Selected node(s) will be RENDERED before sending.\n\n"
+                "Click OK to send CURRENT FRAME only (fast).\n"
+                "Click Cancel to send FULL FRAME RANGE as video (slow)."
+            )
+            if choice is None:
+                render_all = True
 
     clips = []
     for node in selected:
         info = _extract_clip_info(node)
         if info:
             clips.append(info)
+        else:
+            # Need to render this node
+            temp_path = _render_node_output(node, render_all_frames=render_all)
+            if temp_path:
+                clips.append({"file": temp_path, "name": node.name()})
 
     if not clips:
-        nuke.message("No valid Read or Player node selected (or no file path set).")
+        nuke.message("No valid clips to send.")
         return
 
     data = json.dumps({
