@@ -38,6 +38,7 @@ import json
 import tempfile
 import time
 import datetime
+import re
 
 # Google GenAI SDK
 from google import genai
@@ -1181,11 +1182,11 @@ class VeoWidget(QtWidgets.QWidget):
         mode_row.addWidget(mode_label)
 
         self.mode_combo = DropDownComboBox()
-        self.mode_combo.addItem("Text（文本）", VEO_MODE_TEXT)
-        self.mode_combo.addItem("FirstFrame（首帧）", VEO_MODE_FIRST_FRAME)
-        self.mode_combo.addItem("Frames（首尾帧）", VEO_MODE_FRAMES)
-        self.mode_combo.addItem("Ingredients（多图参考）", VEO_MODE_INGREDIENTS)
-        self.mode_combo.setCurrentIndex(0)
+        self.mode_combo.addItem("Text", VEO_MODE_TEXT)
+        self.mode_combo.addItem("FirstFrame", VEO_MODE_FIRST_FRAME)
+        self.mode_combo.addItem("Frames", VEO_MODE_FRAMES)
+        self.mode_combo.addItem("Ingredients", VEO_MODE_INGREDIENTS)
+        self.mode_combo.setCurrentIndex(1)  # Default to FirstFrame
         self.mode_combo.currentIndexChanged.connect(self._on_mode_combo_changed)
         self.mode_combo.currentIndexChanged.connect(lambda _: self._save_all_state_to_node())
         mode_row.addWidget(self.mode_combo, 1)
@@ -1919,11 +1920,11 @@ class VeoRecordWidget(QtWidgets.QWidget):
         mode_label.setStyleSheet("font-weight: bold;")
         mode_row.addWidget(mode_label)
         self.mode_combo = DropDownComboBox()
-        self.mode_combo.addItem("Text（文本）", VEO_MODE_TEXT)
-        self.mode_combo.addItem("FirstFrame（首帧）", VEO_MODE_FIRST_FRAME)
-        self.mode_combo.addItem("Frames（首尾帧）", VEO_MODE_FRAMES)
-        self.mode_combo.addItem("Ingredients（多图参考）", VEO_MODE_INGREDIENTS)
-        self.mode_combo.setCurrentIndex(0)
+        self.mode_combo.addItem("Text", VEO_MODE_TEXT)
+        self.mode_combo.addItem("FirstFrame", VEO_MODE_FIRST_FRAME)
+        self.mode_combo.addItem("Frames", VEO_MODE_FRAMES)
+        self.mode_combo.addItem("Ingredients", VEO_MODE_INGREDIENTS)
+        self.mode_combo.setCurrentIndex(1)  # Default to FirstFrame
         mode_row.addWidget(self.mode_combo, 1)
         mode_row.addStretch()
         main.addLayout(mode_row)
@@ -2200,11 +2201,28 @@ class VeoRecordWidget(QtWidgets.QWidget):
 # ---------------------------------------------------------------------------
 # Node Creation Functions
 # ---------------------------------------------------------------------------
+def _next_veo_name():
+    """Return the next available name like 'veo1', 'veo2', etc."""
+    used = set()
+    for node in nuke.allNodes():
+        n = node.name()
+        if n == "veo":
+            used.add(1)
+        else:
+            m = re.match(r"^veo(\d+)$", n, re.IGNORECASE)
+            if m:
+                used.add(int(m.group(1)))
+    i = 1
+    while i in used:
+        i += 1
+    return "veo{}".format(i)
+
+
 def create_veo_node():
     """
-    Create a VEO_Generate node.
+    Create a VEO node.
     Auto-detect mode based on the number of selected nodes (any type, not just Read):
-      - 0 nodes selected -> Text mode (no inputs)
+      - 0 nodes selected -> FirstFrame mode (1 input, default)
       - 1 node selected  -> FirstFrame mode (1 input)
       - 2 nodes selected -> Frames mode (2 inputs: first + last frame)
       - 3+ nodes selected -> Ingredients mode (3 inputs)
@@ -2220,7 +2238,7 @@ def create_veo_node():
     # Determine mode based on selected node count
     node_count = len(input_nodes)
     if node_count == 0:
-        auto_mode = VEO_MODE_TEXT
+        auto_mode = VEO_MODE_FIRST_FRAME  # Default to FirstFrame
     elif node_count == 1:
         auto_mode = VEO_MODE_FIRST_FRAME
     elif node_count == 2:
@@ -2253,9 +2271,8 @@ def create_veo_node():
 
     # Create the main VEO Group node
     group_node = nuke.nodes.Group()
-    group_node.setName("VEO_Generate")
+    group_node.setName(_next_veo_name())
     group_node["tile_color"].setValue(0x4169E1FF)  # Royal Blue
-    group_node["label"].setValue("VEO Video Generation")
 
     if ref_node:
         sx = int(ref_node["xpos"].value())
@@ -2317,8 +2334,8 @@ def create_veo_node():
         VEO_MODE_FRAMES: "Frames（首尾帧）",
         VEO_MODE_INGREDIENTS: "Ingredients（多图参考）",
     }
-    print("VEO: Created VEO_Generate with auto-detected mode: {} (selected {} nodes)".format(
-        mode_display.get(auto_mode, auto_mode), node_count))
+    print("VEO: Created '{}' with auto-detected mode: {} (selected {} nodes)".format(
+        group_node.name(), mode_display.get(auto_mode, auto_mode), node_count))
 
     return group_node
 
