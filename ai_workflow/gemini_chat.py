@@ -502,18 +502,31 @@ class ChatBubble(QtWidgets.QFrame):
             role_label.setObjectName("roleLabel")
             right_col.addWidget(role_label)
 
-            # "显示思路" dropdown toggle
-            think_row = QtWidgets.QHBoxLayout()
-            think_row.setContentsMargins(0, 0, 0, 0)
+            # "显示思路" dropdown toggle — clickable row to collapse/expand reply
+            self._thinking_collapsed = False
+            self._full_response_text = text
+
+            # Clickable container for thinking toggle
+            think_container = QtWidgets.QWidget()
+            think_container.setCursor(QtCore.Qt.PointingHandCursor)
+            think_container.setStyleSheet(
+                "QWidget { background: transparent; }"
+                "QWidget:hover { background: rgba(255,255,255,0.04); border-radius: 3px; }"
+            )
+            think_row = QtWidgets.QHBoxLayout(think_container)
+            think_row.setContentsMargins(2, 1, 6, 1)
             think_row.setSpacing(4)
             think_label = QtWidgets.QLabel("显示思路")
             think_label.setObjectName("thinkingLabel")
             think_row.addWidget(think_label)
-            think_arrow = QtWidgets.QLabel("▼")
-            think_arrow.setStyleSheet("color: #888888; font-size: 10px;")
-            think_row.addWidget(think_arrow)
+            self._think_arrow = QtWidgets.QLabel("▼")
+            self._think_arrow.setStyleSheet("color: #888888; font-size: 10px;")
+            think_row.addWidget(self._think_arrow)
             think_row.addStretch()
-            right_col.addLayout(think_row)
+            right_col.addWidget(think_container)
+
+            # Connect mouse click event on think_container
+            think_container.mousePressEvent = lambda e: self._toggle_collapse_reply()
 
             # Message text
             self.msg_label = QtWidgets.QLabel(text)
@@ -632,6 +645,45 @@ class ChatBubble(QtWidgets.QFrame):
     def _toggle_expand(self):
         self._is_collapsed = not self._is_collapsed
         self._apply_collapsed_text(self._full_text)
+
+    def _toggle_collapse_reply(self):
+        """Toggle collapse/expand for Gemini reply (model role) bubble."""
+        if not hasattr(self, '_thinking_collapsed'):
+            return
+        self._thinking_collapsed = not self._thinking_collapsed
+        if self._thinking_collapsed:
+            # Collapse: hide reply text, show preview + change arrow to ▲
+            self.msg_label.setVisible(False)
+            self._think_arrow.setText("▲")
+            # Show a brief preview (first 80 chars)
+            preview = self._full_response_text[:80] + ("..." if len(self._full_response_text) > 80 else "")
+            if not hasattr(self, '_collapse_preview'):
+                self._collapse_preview = QtWidgets.QLabel(preview)
+                self._collapse_preview.setWordWrap(True)
+                self._collapse_preview.setStyleSheet(
+                    "color: #999999; font-size: 12px; background: transparent; "
+                    "padding: 2px 0px; font-style: italic;"
+                )
+                # Insert preview label into the layout right after think_container
+                parent_layout = self.layout().itemAt(0).layout()  # top_row -> layout
+                inner_col = None  # find the right_col ( QVBoxLayout inside top_row )
+                for i in range(parent_layout.count()):
+                    item = parent_layout.itemAt(i)
+                    lay = item.layout()
+                    if lay and isinstance(lay, QtWidgets.QVBoxLayout):
+                        inner_col = lay
+                        break
+                if inner_col:
+                    inner_col.insertWidget(2, self._collapse_preview)
+            else:
+                self._collapse_preview.setText(preview)
+                self._collapse_preview.show()
+        else:
+            # Expand: show full text, hide preview, change arrow to ▼
+            self.msg_label.setVisible(True)
+            self._think_arrow.setText("▼")
+            if hasattr(self, '_collapse_preview') and self._collapse_preview is not None:
+                self._collapse_preview.hide()
 
     def _copy_text(self):
         """Copy the full message text to clipboard."""
