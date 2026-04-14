@@ -1316,6 +1316,66 @@ class _WheelScrollArea(QtWidgets.QScrollArea):
         vbar.setValue(vbar.value() - scroll_amount)
 
 
+class _DeleteButtonDelegate(QtWidgets.QStyledItemDelegate):
+    """Custom delegate that paints a (x) delete button on the right of each list item."""
+
+    def __init__(self, parent=None):
+        super(_DeleteButtonDelegate, self).__init__(parent)
+        self._hover_row = -1
+
+    def sizeHint(self, option, index):
+        size = super(_DeleteButtonDelegate, self).sizeHint(option, index)
+        return QtCore.QSize(size.width(), max(size.height(), 36))
+
+    def paint(self, painter, option, index):
+        # Draw background (selected/hover)
+        if option.state & QtWidgets.QStyle.State_Selected:
+            painter.fillRect(option.rect, QtGui.QColor(64, 64, 64))
+        elif option.state & QtWidgets.QStyle.State_MouseOver:
+            painter.fillRect(option.rect, QtGui.QColor(56, 56, 56))
+        else:
+            painter.fillRect(option.rect, QtGui.QColor(42, 42, 42))
+
+        # Draw text with padding
+        text = index.data(QtCore.Qt.DisplayRole)
+        text_rect = option.rect.adjusted(10, 0, -34, 0)  # left pad 10, right pad 34 for button
+        painter.setPen(QtGui.QColor(224, 224, 224))
+        font = painter.font()
+        font.setPixelSize(13)
+        painter.setFont(font)
+        flags = QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft | QtCore.Qt.TextSingleLine
+        painter.drawText(text_rect, flags, str(text))
+
+        # Draw "x" delete button on the right
+        btn_w = 24
+        btn_h = 24
+        btn_x = option.rect.right() - btn_w - 6
+        btn_y = option_rect_center = option.rect.center().y() - btn_h // 2
+        btn_rect = QtCore.QRect(btn_x, btn_y, btn_w, btn_h)
+
+        row = index.row()
+        is_hover = (row == self._hover_row)
+
+        # Button circle background
+        if is_hover:
+            painter.setBrush(QtGui.QColor(192, 57, 43))  # red when hover over button area
+        else:
+            painter.setBrush(QtGui.QColor(60, 60, 60))
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.drawEllipse(btn_rect)
+
+        # "×" symbol
+        painter.setPen(QtGui.QColor(255, 255, 255))
+        font = painter.font()
+        font.setPixelSize(14)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(btn_rect, QtCore.Qt.AlignCenter, "\u00d7")
+
+    def set_hover_row(self, row):
+        self._hover_row = row
+
+
 class _SessionDropdown(QtWidgets.QPushButton):
     """Custom dropdown widget for session selection with per-item delete support.
 
@@ -1332,6 +1392,7 @@ class _SessionDropdown(QtWidgets.QPushButton):
         self._signals_blocked = False
         self._popup = None
         self._list_widget = None
+        self._delegate = None
 
         # Style like a combobox
         self.setText("Select Session")
@@ -1378,27 +1439,6 @@ class _SessionDropdown(QtWidgets.QPushButton):
 
     # ---- Popup ---------------------------------------------------------------
 
-    def _populate_list(self):
-        self._list_widget.clear()
-        for i, (title, _) in enumerate(self._items):
-            item = QtWidgets.QListWidgetItem(title)
-            # Store index as data so we know which one to delete
-            item.setData(QtCore.Qt.UserRole, i)
-            item.setSizeHint(QtCore.QSize(280, 36))
-            self._list_widget.addItem(item)
-
-        # Enable context menu (right-click) for deletion
-        self._list_widget.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
-
-    def _on_item_clicked(self, item):
-        row = self._list_widget.row(item)
-        if row >= 0 and row != self._current_idx:
-            self._current_idx = row
-            self.setText(self._items[row][0])
-            if not self._signals_blocked:
-                self.currentIndexChanged.emit(row)
-        self._popup.hide()
-
     def _show_popup(self):
         if not self._items:
             return
@@ -1415,17 +1455,24 @@ class _SessionDropdown(QtWidgets.QPushButton):
             self._list_widget = QtWidgets.QListWidget()
             self._list_widget.setStyleSheet(
                 "QListWidget { background-color: #2a2a2a; border: 1px solid #3a3a3a; "
-                "border-radius: 6px; color: #e0e0e0; font-size: 13px; outline: none; }"
-                "QListWidget::item { padding: 8px 10px; border-radius: 4px; color: #e0e0e0; }"
-                "QListWidget::item:hover { background-color: #383838; }"
-                "QListWidget::item:selected { background-color: #404040; color: #e0e0e0; }"
+                "border-radius: 6px; outline: none; }"
                 "QScrollBar:vertical { background: transparent; width: 8px; }"
                 "QScrollBar::handle:vertical { background: #555555; border-radius: 4px; min-height: 20px; }"
                 "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+                "QListWidget::item { border: none; padding: 0px; margin: 1px; border-radius: 4px; }"
             )
             self._list_widget.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
-            self._list_widget.itemClicked.connect(self._on_item_clicked)
-            self._list_widget.customContextMenuRequested.connect(self._show_item_context_menu)
+            self._list_widget.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+            # NO itemClicked here — all click handling done via eventFilter
+
+            # Custom delegate with delete button
+            self._delegate = _DeleteButtonDelegate(self._list_widget)
+            self._list_widget.setItemDelegate(self._delegate)
+
+            # Track mouse movement for hover effect on delete buttons
+            self._list_widget.viewport().setMouseTracking(True)
+            self._list_widget.viewport().installEventFilter(self)
+
             layout.addWidget(self._list_widget)
 
         # Populate / refresh items
@@ -1441,28 +1488,68 @@ class _SessionDropdown(QtWidgets.QPushButton):
             pos = self.mapToGlobal(QtCore.QPoint(0, 0)) - QtCore.QPoint(0, popup_h)
 
         self._popup.move(pos)
-        self._popup.setFixedWidth(max(btn_rect.width(), 320))
+        self._popup.setFixedWidth(max(btn_rect.width(), 340))
         self._popup.show()
         self._popup.setFocus()
 
-    def _show_item_context_menu(self, pos):
-        """Right-click context menu on a session item to delete it."""
-        item = self._list_widget.itemAt(pos)
-        if item is None:
-            return
-        idx = item.data(QtCore.Qt.UserRole)
-        if idx is None:
-            idx = self._list_widget.row(item)
+    def eventFilter(self, obj, event):
+        """Track hover & handle all clicks: text area = select, right side = delete."""
+        vp = getattr(self._list_widget, 'viewport', lambda: None)()
+        if obj != vp:
+            return super(_SessionDropdown, self).eventFilter(obj, event)
 
-        menu = QtWidgets.QMenu()
-        del_action = menu.addAction("Delete Session")
-        del_action.setStyleSheet(
-            "QMenu { background: #2a2a2a; border: 1px solid #3a3a3a; color: #e0e0e0; padding: 6px; }"
-            "QMenu::item:selected { background: #c0392b; color: white; border-radius: 3px; padding-left: 20px; padding-right: 10px; }"
-        )
-        action = menu.exec_(self._list_widget.mapToGlobal(pos))
-        if action == del_action:
-            self._delete_item(idx)
+        if event.type() == QtCore.QEvent.MouseMove:
+            pos = event.pos()
+            item = self._list_widget.itemAt(pos)
+            if item:
+                self._delegate.set_hover_row(self._list_widget.row(item))
+            else:
+                self._delegate.set_hover_row(-1)
+            vp.update()
+            return False
+
+        if event.type() == QtCore.QEvent.MouseButtonRelease and event.button() == QtCore.Qt.LeftButton:
+            pos = event.pos()
+            item = self._list_widget.itemAt(pos)
+            if item:
+                rect = self._list_widget.visualItemRect(item)
+                # Delete button area: rightmost 36px
+                btn_area = QtCore.QRect(rect.right() - 36, rect.y(), 36, rect.height())
+                if btn_area.contains(pos):
+                    # Clicked delete button
+                    row = self._list_widget.row(item)
+                    self._delete_item(row)
+                    return True
+                else:
+                    # Clicked text → select session + close popup
+                    row = self._list_widget.row(item)
+                    if row >= 0 and row != self._current_idx:
+                        self._current_idx = row
+                        self.setText(self._items[row][0])
+                        if not self._signals_blocked:
+                            self.currentIndexChanged.emit(row)
+                    self._popup.hide()
+                    return True
+
+        return super(_SessionDropdown, self).eventFilter(obj, event)
+
+    def _populate_list(self):
+        self._list_widget.clear()
+        for i, (title, _) in enumerate(self._items):
+            item = QtWidgets.QListWidgetItem(title)
+            item.setData(QtCore.Qt.UserRole, i)
+            item.setSizeHint(QtCore.QSize(280, 38))
+            self._list_widget.addItem(item)
+
+    def _on_item_clicked(self, item):
+        """Called by itemClicked signal — only switches session."""
+        row = self._list_widget.row(item)
+        if row >= 0 and row != self._current_idx:
+            self._current_idx = row
+            self.setText(self._items[row][0])
+            if not self._signals_blocked:
+                self.currentIndexChanged.emit(row)
+        self._popup.hide()
 
     def _delete_item(self, idx):
         """Remove a session item by index."""
