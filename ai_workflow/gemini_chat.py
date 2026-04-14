@@ -251,6 +251,20 @@ QLabel#inputLabel {
     font-size: 13px;
     font-weight: bold;
 }
+/* ---- Session dropdown button (custom) ---- */
+QPushButton#sessionDropdown {
+    background-color: #2a2a2a;
+    color: #e0e0e0;
+    border: 1px solid #3a3a3a;
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 13px;
+    text-align: left;
+}
+QPushButton#sessionDropdown:hover {
+    background-color: #333333;
+    border-color: #555555;
+}
 /* ---- Chat area role labels ---- */
 QLabel#roleLabel {
     color: #e0e0e0;
@@ -1302,6 +1316,180 @@ class _WheelScrollArea(QtWidgets.QScrollArea):
         vbar.setValue(vbar.value() - scroll_amount)
 
 
+class _SessionDropdown(QtWidgets.QPushButton):
+    """Custom dropdown widget for session selection with per-item delete support.
+
+    Replaces QComboBox so each session entry has a remove (x) button,
+    and the popup always aligns to the bottom edge of the trigger button.
+    """
+
+    currentIndexChanged = QtCore.Signal(int)
+
+    def __init__(self, parent=None):
+        super(_SessionDropdown, self).__init__(parent)
+        self._items = []  # list of (title, userData)
+        self._current_idx = -1
+        self._signals_blocked = False
+        self._popup = None
+        self._list_widget = None
+
+        # Style like a combobox
+        self.setText("Select Session")
+        self.setObjectName("sessionDropdown")
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+
+        self.clicked.connect(self._show_popup)
+
+    # ---- QComboBox-compatible API -------------------------------------------
+
+    def blockSignals(self, b):
+        self._signals_blocked = b
+        return super(_SessionDropdown, self).blockSignals(b)
+
+    def addItem(self, text, userData=None):
+        self._items.append((text, userData))
+        if self._current_idx < 0:
+            self._current_idx = 0
+            self.setText(text)
+
+    def clear(self):
+        self._items = []
+        self._current_idx = -1
+        self.setText("Select Session")
+
+    def itemData(self, idx):
+        if 0 <= idx < len(self._items):
+            return self._items[idx][1]
+        return None
+
+    def findData(self, data):
+        for i, (_, ud) in enumerate(self._items):
+            if ud == data:
+                return i
+        return -1
+
+    def setCurrentIndex(self, idx):
+        if 0 <= idx < len(self._items):
+            self._current_idx = idx
+            self.setText(self._items[idx][0])
+
+    def currentIndex(self):
+        return self._current_idx
+
+    # ---- Popup ---------------------------------------------------------------
+
+    def _populate_list(self):
+        self._list_widget.clear()
+        for i, (title, _) in enumerate(self._items):
+            item = QtWidgets.QListWidgetItem(title)
+            # Store index as data so we know which one to delete
+            item.setData(QtCore.Qt.UserRole, i)
+            item.setSizeHint(QtCore.QSize(280, 36))
+            self._list_widget.addItem(item)
+
+        # Enable context menu (right-click) for deletion
+        self._list_widget.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+
+    def _on_item_clicked(self, item):
+        row = self._list_widget.row(item)
+        if row >= 0 and row != self._current_idx:
+            self._current_idx = row
+            self.setText(self._items[row][0])
+            if not self._signals_blocked:
+                self.currentIndexChanged.emit(row)
+        self._popup.hide()
+
+    def _show_popup(self):
+        if not self._items:
+            return
+
+        # Create popup on first use
+        if self._popup is None:
+            self._popup = QtWidgets.QFrame(self, QtCore.Qt.Popup | QtCore.Qt.FramelessWindowHint)
+            self._popup.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+
+            layout = QtWidgets.QVBoxLayout(self._popup)
+            layout.setContentsMargins(4, 4, 4, 4)
+            layout.setSpacing(2)
+
+            self._list_widget = QtWidgets.QListWidget()
+            self._list_widget.setStyleSheet(
+                "QListWidget { background-color: #2a2a2a; border: 1px solid #3a3a3a; "
+                "border-radius: 6px; color: #e0e0e0; font-size: 13px; outline: none; }"
+                "QListWidget::item { padding: 8px 10px; border-radius: 4px; color: #e0e0e0; }"
+                "QListWidget::item:hover { background-color: #383838; }"
+                "QListWidget::item:selected { background-color: #404040; color: #e0e0e0; }"
+                "QScrollBar:vertical { background: transparent; width: 8px; }"
+                "QScrollBar::handle:vertical { background: #555555; border-radius: 4px; min-height: 20px; }"
+                "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+            )
+            self._list_widget.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+            self._list_widget.itemClicked.connect(self._on_item_clicked)
+            self._list_widget.customContextMenuRequested.connect(self._show_item_context_menu)
+            layout.addWidget(self._list_widget)
+
+        # Populate / refresh items
+        self._populate_list()
+
+        # Position: anchor bottom-left of button to top-left of popup
+        btn_rect = self.geometry()
+        pos = self.mapToGlobal(QtCore.QPoint(0, btn_rect.height()))
+        screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
+        popup_h = min(len(self._items) * 44 + 12, 300)  # max ~7 items visible
+        # If not enough room below, flip upward
+        if pos.y() + popup_h > screen.bottom():
+            pos = self.mapToGlobal(QtCore.QPoint(0, 0)) - QtCore.QPoint(0, popup_h)
+
+        self._popup.move(pos)
+        self._popup.setFixedWidth(max(btn_rect.width(), 320))
+        self._popup.show()
+        self._popup.setFocus()
+
+    def _show_item_context_menu(self, pos):
+        """Right-click context menu on a session item to delete it."""
+        item = self._list_widget.itemAt(pos)
+        if item is None:
+            return
+        idx = item.data(QtCore.Qt.UserRole)
+        if idx is None:
+            idx = self._list_widget.row(item)
+
+        menu = QtWidgets.QMenu()
+        del_action = menu.addAction("Delete Session")
+        del_action.setStyleSheet(
+            "QMenu { background: #2a2a2a; border: 1px solid #3a3a3a; color: #e0e0e0; padding: 6px; }"
+            "QMenu::item:selected { background: #c0392b; color: white; border-radius: 3px; padding-left: 20px; padding-right: 10px; }"
+        )
+        action = menu.exec_(self._list_widget.mapToGlobal(pos))
+        if action == del_action:
+            self._delete_item(idx)
+
+    def _delete_item(self, idx):
+        """Remove a session item by index."""
+        if idx < 0 or idx >= len(self._items):
+            return
+        sid = self._items[idx][1]
+        del self._items[idx]
+
+        if len(self._items) == 0:
+            self._current_idx = -1
+            self.setText("Select Session")
+        elif self._current_idx >= len(self._items):
+            self._current_idx = len(self._items) - 1
+            self.setText(self._items[self._current_idx][0])
+
+        self._populate_list()
+        self._popup.hide()
+
+        # Notify parent panel to delete this session from storage
+        parent = self.parent()
+        while parent is not None:
+            if hasattr(parent, '_session_deleted'):
+                parent._session_deleted(sid)
+                break
+            parent = parent.parent()
+
+
 # ---------------------------------------------------------------------------
 # Main Chat Panel
 # ---------------------------------------------------------------------------
@@ -1345,8 +1533,8 @@ class GeminiChatPanel(QtWidgets.QWidget):
         new_btn.clicked.connect(self._new_dialogue)
         top_bar.addWidget(new_btn)
 
-        # Session selector (dropdown, takes remaining space)
-        self._session_combo = QtWidgets.QComboBox()
+        # Session selector (custom dropdown with delete support)
+        self._session_combo = _SessionDropdown()
         self._session_combo.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self._session_combo.currentIndexChanged.connect(self._on_session_selected)
         top_bar.addWidget(self._session_combo)
@@ -1509,6 +1697,24 @@ class GeminiChatPanel(QtWidgets.QWidget):
             self._load_session(sessions[0][0])
         else:
             self._new_dialogue()
+
+    def _session_deleted(self, session_id):
+        """Callback from _SessionDropdown when user clicks (x) on a session item."""
+        # Delete from storage
+        self._session_mgr.delete_session(session_id)
+
+        # If we deleted the current active session, switch
+        if self._current_session and self._current_session.get("id") == session_id:
+            self._current_session = None
+            self._refresh_session_list()
+            sessions = self._session_mgr.list_sessions()
+            if sessions:
+                self._load_session(sessions[0][0])
+            else:
+                self._new_dialogue()
+        else:
+            # Just refresh dropdown list
+            self._refresh_session_list()
 
     def _sync_model_combo(self):
         if self._current_session:
