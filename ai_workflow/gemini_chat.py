@@ -1065,10 +1065,10 @@ class ImageStrip(QtWidgets.QWidget):
             self._layout.addWidget(card)
 
         # Manually calculate the inner widget width so QScrollArea can scroll
-        # Each card is 64px wide, spacing is 4px between cards
+        # Each card is 42px wide, spacing is 4px between cards
         n = len(self._images)
         if n > 0:
-            inner_w = n * 64 + (n - 1) * 4  # cards + spacing between them
+            inner_w = n * 42 + (n - 1) * 4  # cards + spacing between them
         else:
             inner_w = 0
         print("[NB ImageStrip] _rebuild: calculated inner_w={} for {} cards".format(inner_w, n))
