@@ -1660,7 +1660,14 @@ class GeminiChatPanel(QtWidgets.QWidget):
         input_section.addWidget(input_label)
 
         # Row 2: Select + Paste + image strip + Model combo (inside a bordered container)
-        toolbar_row = QtWidgets.QHBoxLayout()
+        toolbar_frame = QtWidgets.QFrame()
+        toolbar_frame.setObjectName("inputToolbarFrame")
+        toolbar_frame.setStyleSheet(
+            "QFrame#inputToolbarFrame { background-color: #252525; border: 1px solid #555555; "
+            "border-radius: 8px; }"
+        )
+        toolbar_row = QtWidgets.QHBoxLayout(toolbar_frame)
+        toolbar_row.setContentsMargins(6, 4, 6, 4)
         toolbar_row.setSpacing(6)
         toolbar_row.setAlignment(QtCore.Qt.AlignVCenter)
 
@@ -1688,7 +1695,7 @@ class GeminiChatPanel(QtWidgets.QWidget):
         self._model_combo.currentIndexChanged.connect(self._on_model_changed)
         toolbar_row.addWidget(self._model_combo)
 
-        input_section.addLayout(toolbar_row)
+        input_section.addWidget(toolbar_frame)
 
         # Row 2: Text input
         self._text_input = QtWidgets.QPlainTextEdit()
