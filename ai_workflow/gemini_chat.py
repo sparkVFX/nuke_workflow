@@ -112,7 +112,7 @@ QLabel {
 }
 QLineEdit, QTextEdit, QPlainTextEdit {
     background-color: #2a2a2a;
-    border: 1px solid #3a3a3a;
+    border: none;
     border-radius: 6px;
     padding: 8px;
     color: #e0e0e0;
@@ -121,7 +121,7 @@ QLineEdit, QTextEdit, QPlainTextEdit {
     font-size: 13px;
 }
 QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {
-    border: 1px solid #555555;
+    border: none;
 }
 QComboBox {
     background-color: #2a2a2a;
@@ -398,7 +398,7 @@ class ChatBubble(QtWidgets.QFrame):
         if is_user:
             # ---- User message: compact bar, right-aligned, max 3 lines ----
             self.setStyleSheet(
-                "QFrame { background-color: #2d2d2d; border: 1px solid #3a3a3a; "
+                "QFrame { background-color: #2d2d2d; border: none; "
                 "border-radius: 12px; padding: 0px; }"
             )
             # Shrink-to-content but cap at a reasonable max
@@ -1581,6 +1581,39 @@ class _SessionDropdown(QtWidgets.QPushButton):
             parent = parent.parent()
 
 
+
+class _ModelComboBox(QtWidgets.QComboBox):
+    """QComboBox with dropdown list always aligned to bottom edge."""
+
+    def showPopup(self):
+        super(_ModelComboBox, self).showPopup()
+        # Delay repositioning until after the popup is fully displayed
+        QtCore.QTimer.singleShot(0, self._align_popup_to_bottom)
+
+    def _align_popup_to_bottom(self):
+        """Move popup so its top edge aligns with this widget's bottom edge."""
+        # In PySide2, find the actual popup container window
+        # Try multiple strategies to locate the dropdown list container
+        popup = None
+        view = self.view()
+        if view:
+            # Walk up from the list view to find the popup container
+            w = view.parentWidget()
+            while w is not None and w != self:
+                # Check if this looks like the popup (top-level or frameless)
+                if w.windowFlags() & QtCore.Qt.Popup or (
+                    hasattr(w, 'isWindow') and w.isWindow()):
+                    popup = w
+                    break
+                w = w.parentWidget()
+
+        if not popup:
+            return
+        btn_rect = self.geometry()
+        pos = self.mapToGlobal(QtCore.QPoint(0, btn_rect.height()))
+        popup.move(pos)
+
+
 # ---------------------------------------------------------------------------
 # Main Chat Panel
 # ---------------------------------------------------------------------------
@@ -1641,7 +1674,7 @@ class GeminiChatPanel(QtWidgets.QWidget):
         self._chat_container = QtWidgets.QWidget()
         self._chat_container.setStyleSheet("QWidget { background-color: #222222; }")
         self._chat_layout = QtWidgets.QVBoxLayout(self._chat_container)
-        self._chat_layout.setContentsMargins(6, 6, 6, 6)
+        self._chat_layout.setContentsMargins(10, 8, 10, 30)
         self._chat_layout.setSpacing(10)
         self._chat_layout.addStretch()
 
@@ -1693,8 +1726,9 @@ class GeminiChatPanel(QtWidgets.QWidget):
         toolbar_row.addWidget(self._image_strip, 1)
 
         # Model selector on the right
-        self._model_combo = QtWidgets.QComboBox()
-        self._model_combo.setMinimumWidth(130)
+        self._model_combo = _ModelComboBox()
+        self._model_combo.setFixedWidth(155)
+        self._model_combo.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
         for m in CHAT_MODELS:
             self._model_combo.addItem(m)
         self._model_combo.currentIndexChanged.connect(self._on_model_changed)
@@ -1706,6 +1740,10 @@ class GeminiChatPanel(QtWidgets.QWidget):
         self._text_input = QtWidgets.QPlainTextEdit()
         self._text_input.setPlaceholderText("Please enter the question...")
         self._text_input.setFixedHeight(70)
+        self._text_input.setStyleSheet(
+            "QPlainTextEdit { background-color: #2a2a2a; border: none; "
+            "border-radius: 6px; padding: 8px; color: #e0e0e0; font-size: 13px; }"
+        )
         self._text_input.installEventFilter(self)
         input_section.addWidget(self._text_input)
 
@@ -1905,8 +1943,9 @@ class GeminiChatPanel(QtWidgets.QWidget):
 
                 # Set the label's maximumWidth so word-wrap uses it
                 lbl.setMaximumWidth(ideal_label_w)
-                # Fix the bubble to the computed width
-                bubble.setFixedWidth(ideal_bubble_w)
+                # Use setMaximumWidth instead of setFixedWidth so bubbles
+                # can adapt when the window is resized smaller
+                bubble.setMaximumWidth(ideal_bubble_w)
 
                 # Re-evaluate collapsed text now that label has correct width
                 if hasattr(bubble, '_apply_collapsed_text') and hasattr(bubble, '_full_text'):
