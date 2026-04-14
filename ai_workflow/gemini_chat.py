@@ -700,58 +700,58 @@ class _ThumbCard(QtWidgets.QFrame):
     removeClicked = QtCore.Signal(str)  # emits image path
 
     def __init__(self, img_path, parent=None):
-        print("=" * 60)
-        print("[NB ImageStrip] _ThumbCard.__init__ CALLED with path: '{}'".format(img_path))
         super(_ThumbCard, self).__init__(parent)
         self._img_path = img_path
-        self.setFixedSize(64, 64)
-        self.setStyleSheet("QFrame { background: #333; border-radius: 4px; }")
+        # Fixed size to fit inside toolbar (toolbar 56px -> ~48px usable)
+        self.setFixedSize(42, 42)
+        self.setStyleSheet(
+            "QFrame { background: #333333; border-radius: 6px; border: 1px solid #444444; }"
+        )
 
-        # Use a layout so that sizeHint works correctly inside QScrollArea
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setContentsMargins(3, 3, 3, 3)
         layout.setAlignment(QtCore.Qt.AlignCenter)
 
-        # -- thumbnail --
+        thumb_size = 34
         self._thumb = QtWidgets.QLabel()
         _file_exists = bool(img_path and os.path.isfile(img_path))
-        print("[NB ImageStrip] _ThumbCard: file_exists={}, path='{}'".format(_file_exists, img_path))
         if _file_exists:
             pix = QtGui.QPixmap(img_path)
-            print("[NB ImageStrip] _ThumbCard loading: {} | null={}".format(img_path, pix.isNull()))
             if not pix.isNull():
-                pix = pix.scaled(60, 60, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+                pix = pix.scaled(thumb_size, thumb_size,
+                    QtCore.Qt.KeepAspectRatioByExpanding,
+                    QtCore.Qt.SmoothTransformation)
+                if pix.width() > thumb_size or pix.height() > thumb_size:
+                    cx = (pix.width() - thumb_size) // 2
+                    cy = (pix.height() - thumb_size) // 2
+                    pix = pix.copy(cx, cy, thumb_size, thumb_size)
                 self._thumb.setPixmap(pix)
-                print("[NB ImageStrip] _ThumbCard: OK - pixmap set ({}x{})".format(pix.width(), pix.height()))
             else:
-                # File exists but cannot be decoded as an image
-                self._thumb.setText("⚠")
-                self._thumb.setStyleSheet(
-                    "color: #f59e0b; font-size: 24px; background: #2a2a2a; border-radius: 4px;")
-                print("[NB ImageStrip] _ThumbCard: WARN - file exists but not a valid image")
+                self._thumb.setText("!")
+                self._thumb.setStyleSheet("color:#f59e0b;font-size:18px;background:transparent;")
         else:
-            # File is missing — show a broken-link placeholder so the user knows
-            self._thumb.setText("🖼")
-            self._thumb.setStyleSheet(
-                "color: #666; font-size: 20px; background: #2a2a2a; border-radius: 4px;")
+            self._thumb.setText("?")
+            self._thumb.setStyleSheet("color:#666;font-size:16px;background:transparent;")
             self._thumb.setToolTip("Image file not found:\n{}".format(img_path))
-            print("[NB ImageStrip] _ThumbCard: MISSING - showing placeholder for '{}'".format(img_path))
-        self._thumb.setFixedSize(60, 60)
+
+        self._thumb.setFixedSize(thumb_size, thumb_size)
         self._thumb.setAlignment(QtCore.Qt.AlignCenter)
+        self._thumb.setScaledContents(False)
         layout.addWidget(self._thumb)
 
-        # -- remove button (overlay, TOP-RIGHT corner, hidden by default) --
-        self._remove_btn = QtWidgets.QPushButton("✕", self)
-        btn_size = 18
+        btn_size = 16
+        self._remove_btn = QtWidgets.QPushButton("\u00d7", self)
         self._remove_btn.setFixedSize(btn_size, btn_size)
+        br = btn_size // 2
+        # Use QPalette instead of stylesheet (Nuke Qt can't parse rgba stylesheets)
+        _btn_palette = QtGui.QPalette()
+        _btn_palette.setColor(QtGui.QPalette.Button, QtGui.QColor(239, 68, 68, 200))
+        _btn_palette.setColor(QtGui.QPalette.ButtonText, QtCore.Qt.white)
+        self._remove_btn.setPalette(_btn_palette)
         self._remove_btn.setStyleSheet(
-            "QPushButton { background: rgba(239,68,68,200); color: white; border: none; "
-            "border-radius: %dpx; font-size: 10px; font-weight: bold; }"
-            "QPushButton:hover { background: rgba(220,38,38,240); }" % (btn_size // 2)
-        )
-        # Position at top-right corner with small margin
-        margin = 2
-        self._remove_btn.move(64 - btn_size - margin, margin)
+            "QPushButton{{border:none;border-radius:{}px;font-size:9px;font-weight:bold;}}".format(br))
+        margin = 1
+        self._remove_btn.move(42 - btn_size - margin, margin)
         self._remove_btn.hide()
         self._remove_btn.clicked.connect(lambda: self.removeClicked.emit(self._img_path))
 
@@ -862,9 +862,9 @@ class ImageStrip(QtWidgets.QWidget):
         self._scroll.setWidgetResizable(False)  # inner widget keeps its own width
         self._scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self._scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self._scroll.setFixedHeight(72)
+        self._scroll.setFixedHeight(42)
         self._scroll.setStyleSheet(
-            "QScrollArea { background: #252525; border: 1px solid #333333; border-radius: 8px; }"
+            "QScrollArea { background: transparent; border: none; }"
         )
 
         # Inner container widget + layout for the thumbnail cards
@@ -880,7 +880,7 @@ class ImageStrip(QtWidgets.QWidget):
 
         # --- Pinned "+" button always visible at the right ---
         self._add_btn = QtWidgets.QPushButton("+")
-        self._add_btn.setFixedSize(40, 40)
+        self._add_btn.setFixedSize(34, 34)
         self._add_btn.setToolTip("Add local file (images & documents)")
         self._add_btn.setStyleSheet(
             "QPushButton { background: #2a2a2a; color: #888888; border: 1px solid #444444; "
@@ -909,6 +909,10 @@ class ImageStrip(QtWidgets.QWidget):
         # Register with the app-level wheel grabber so scrolling works
         # even when Nuke intercepts wheel events at a higher level.
         _ImageStripWheelGrabber.register(self)
+
+        # Fix our own height — never grow beyond this
+        self.setFixedHeight(48)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
 
         # Build initial state
         self._rebuild()
@@ -1068,14 +1072,14 @@ class ImageStrip(QtWidgets.QWidget):
         else:
             inner_w = 0
         print("[NB ImageStrip] _rebuild: calculated inner_w={} for {} cards".format(inner_w, n))
-        self._inner.setFixedSize(inner_w, 72)
+        self._inner.setFixedSize(inner_w, 42)
 
         # Scroll to the rightmost position so newest images are visible
         QtCore.QTimer.singleShot(0, lambda: self._scroll.horizontalScrollBar().setValue(
             self._scroll.horizontalScrollBar().maximum()))
 
-        # Set overall strip height
-        self.setFixedHeight(72 if self._images else 48)
+        # Set overall strip height (fixed, matches toolbar)
+        self.setFixedHeight(42)
 
     def _remove(self, path):
         if path in self._images:
@@ -1662,6 +1666,7 @@ class GeminiChatPanel(QtWidgets.QWidget):
         # Row 2: Select + Paste + image strip + Model combo (inside a bordered container)
         toolbar_frame = QtWidgets.QFrame()
         toolbar_frame.setObjectName("inputToolbarFrame")
+        toolbar_frame.setFixedHeight(56)
         toolbar_frame.setStyleSheet(
             "QFrame#inputToolbarFrame { background-color: #252525; border: 1px solid #555555; "
             "border-radius: 8px; }"
