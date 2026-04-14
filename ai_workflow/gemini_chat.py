@@ -1575,13 +1575,27 @@ class _SessionDropdown(QtWidgets.QPushButton):
         btn_rect = self.geometry()
         pos = self.mapToGlobal(QtCore.QPoint(0, btn_rect.height()))
         screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
-        popup_h = min(len(self._items) * 44 + 12, 300)  # max ~7 items visible
+
+        # Dynamic height based on item count
+        n_items = len(self._items)
+        if n_items > 7:
+            popup_h = 300  # cap at ~7 items with scrollbar
+        else:
+            popup_h = n_items * 44 + 12
+
         # If not enough room below, flip upward
         if pos.y() + popup_h > screen.bottom():
             pos = self.mapToGlobal(QtCore.QPoint(0, 0)) - QtCore.QPoint(0, popup_h)
 
+        # Dynamic width: measure text to find optimal size
+        fm = QtGui.QFontMetrics(self.font())
+        max_text_w = max(fm.horizontalAdvance(t[0]) for t in self._items) if self._items else 0
+        # Account for delete button area (36px right side) + padding (~60px)
+        dynamic_w = max_text_w + 96  # padding left(12) + text + spacing + delete_btn(36) + padding_right(12) + margin
+        popup_w = max(btn_rect.width(), min(dynamic_w, 400))  # between btn_width and 400px cap
+
         self._popup.move(pos)
-        self._popup.setFixedWidth(max(btn_rect.width(), 340))
+        self._popup.setFixedSize(popup_w, popup_h)
         self._popup.show()
         self._popup.setFocus()
 
@@ -1631,7 +1645,8 @@ class _SessionDropdown(QtWidgets.QPushButton):
         for i, (title, _) in enumerate(self._items):
             item = QtWidgets.QListWidgetItem(title)
             item.setData(QtCore.Qt.UserRole, i)
-            item.setSizeHint(QtCore.QSize(280, 38))
+            # Dynamic height only; width is handled by popup setFixedSize
+            item.setSizeHint(QtCore.QSize(-1, 38))
             self._list_widget.addItem(item)
 
     def _on_item_clicked(self, item):
