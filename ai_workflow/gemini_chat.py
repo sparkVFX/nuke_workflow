@@ -1465,6 +1465,13 @@ class _DeleteButtonDelegate(QtWidgets.QStyledItemDelegate):
         painter.setFont(font)
         painter.drawText(btn_rect, QtCore.Qt.AlignCenter, "\u00d7")
 
+        # Draw separator line below item (except last one)
+        list_w = self.parent()
+        if list_w and row < list_w.count() - 1:
+            sep_y = option.rect.bottom() - 1
+            painter.setPen(QtGui.QColor(51, 51, 51))  # #333333
+            painter.drawLine(option.rect.left() + 8, sep_y, option.rect.right() - 8, sep_y)
+
     def set_hover_row(self, row):
         self._hover_row = row
 
@@ -1542,20 +1549,22 @@ class _SessionDropdown(QtWidgets.QPushButton):
             self._popup.setAttribute(QtCore.Qt.WA_TranslucentBackground)
 
             layout = QtWidgets.QVBoxLayout(self._popup)
-            layout.setContentsMargins(4, 4, 4, 4)
+            layout.setContentsMargins(4, 4, 4, 0)
             layout.setSpacing(2)
 
             self._list_widget = QtWidgets.QListWidget()
             self._list_widget.setStyleSheet(
                 "QListWidget { background-color: #2a2a2a; border: 1px solid #3a3a3a; "
-                "border-radius: 6px; outline: none; }"
+                "border-radius: 6px; outline: none; padding-bottom: 0px; }"
                 "QScrollBar:vertical { background: transparent; width: 8px; }"
                 "QScrollBar::handle:vertical { background: #555555; border-radius: 4px; min-height: 20px; }"
                 "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
-                "QListWidget::item { border: none; padding: 0px; margin: 1px; border-radius: 4px; }"
+                "QListWidget::item { border: none; padding: 0px; margin: 0px; border-radius: 4px; }"
             )
             self._list_widget.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
             self._list_widget.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+            # Force zero bottom padding on viewport
+            self._list_widget.viewport().setContentsMargins(0, 0, 0, 0)
             # NO itemClicked here — all click handling done via eventFilter
 
             # Custom delegate with delete button
@@ -1578,10 +1587,11 @@ class _SessionDropdown(QtWidgets.QPushButton):
 
         # Dynamic height based on item count
         n_items = len(self._items)
+        ITEM_H = 38
         if n_items > 7:
             popup_h = 300  # cap at ~7 items with scrollbar
         else:
-            popup_h = n_items * 44 + 12
+            popup_h = n_items * ITEM_H + 2
 
         # If not enough room below, flip upward
         if pos.y() + popup_h > screen.bottom():
@@ -1778,7 +1788,7 @@ class GeminiChatPanel(QtWidgets.QWidget):
         self._chat_container = QtWidgets.QWidget()
         self._chat_container.setStyleSheet("QWidget { background-color: #222222; }")
         self._chat_layout = QtWidgets.QVBoxLayout(self._chat_container)
-        self._chat_layout.setContentsMargins(10, 8, 10, 30)
+        self._chat_layout.setContentsMargins(10, 8, 10, 15)
         self._chat_layout.setSpacing(10)
         self._chat_layout.addStretch()
 
