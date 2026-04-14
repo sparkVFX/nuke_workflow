@@ -101,116 +101,136 @@ INLINE_MIME_EXTENSIONS = {
 # ---------------------------------------------------------------------------
 GEMINI_CHAT_STYLE = """
 QWidget#geminiChatRoot {
-    background-color: #222222;
-    color: #eeeeee;
+    background-color: #1e1e1e;
+    color: #e0e0e0;
     font-family: 'Segoe UI', 'Arial', sans-serif;
-    font-size: 12px;
+    font-size: 13px;
 }
 QLabel {
-    color: #eeeeee;
+    color: #e0e0e0;
     background: transparent;
 }
 QLineEdit, QTextEdit, QPlainTextEdit {
-    background-color: #1a1a1a;
-    border: 1px solid #333333;
-    border-radius: 4px;
-    padding: 6px;
-    color: #ffffff;
+    background-color: #2a2a2a;
+    border: 1px solid #3a3a3a;
+    border-radius: 6px;
+    padding: 8px;
+    color: #e0e0e0;
     selection-background-color: #4f87f7;
     selection-color: #ffffff;
+    font-size: 13px;
 }
 QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {
-    border: 1px solid #4f87f7;
+    border: 1px solid #555555;
 }
 QComboBox {
-    background-color: #333333;
-    border: 1px solid #444444;
-    border-radius: 4px;
-    padding: 5px;
-    color: #ffffff;
+    background-color: #2a2a2a;
+    border: 1px solid #3a3a3a;
+    border-radius: 6px;
+    padding: 6px 10px;
+    color: #e0e0e0;
+    font-size: 13px;
+    min-height: 20px;
 }
 QComboBox::drop-down {
     border: none;
-    width: 20px;
+    width: 24px;
+}
+QComboBox::down-arrow {
+    width: 10px;
+    height: 10px;
 }
 QComboBox QAbstractItemView {
     background-color: #2a2a2a;
-    selection-background-color: #4f87f7;
+    selection-background-color: #3a3a3a;
     selection-color: #ffffff;
+    outline: none;
+    border: 1px solid #3a3a3a;
 }
 QPushButton#sendBtn {
-    background-color: #4f87f7;
-    color: #ffffff;
-    border: none;
-    border-radius: 4px;
+    background-color: #3a3a3a;
+    color: #e0e0e0;
+    border: 1px solid #444444;
+    border-radius: 6px;
     padding: 10px 20px;
     font-weight: bold;
-    font-size: 13px;
+    font-size: 14px;
 }
 QPushButton#sendBtn:hover {
-    background-color: #6a9fff;
+    background-color: #444444;
+    border-color: #555555;
 }
 QPushButton#sendBtn:pressed {
-    background-color: #3a6fd8;
+    background-color: #333333;
 }
 QPushButton#sendBtn:disabled {
-    background-color: #555555;
-    color: #888888;
+    background-color: #2a2a2a;
+    color: #666666;
+    border-color: #333333;
 }
 QPushButton#actionBtn {
-    background-color: #404040;
-    color: #e0e0e0;
-    border: 1px solid #555555;
-    padding: 5px 10px;
-    font-size: 11px;
-    border-radius: 3px;
+    background-color: #3a3a3a;
+    color: #c0c0c0;
+    border: 1px solid #484848;
+    padding: 6px 14px;
+    font-size: 12px;
+    border-radius: 6px;
 }
 QPushButton#actionBtn:hover {
-    background-color: #505050;
-    border-color: #777777;
+    background-color: #444444;
+    border-color: #606060;
+    color: #e0e0e0;
 }
 QPushButton#newDialogueBtn {
-    background-color: #2d8a4e;
-    color: #ffffff;
-    border: none;
-    border-radius: 4px;
-    padding: 5px 12px;
-    font-weight: bold;
-    font-size: 11px;
+    background-color: transparent;
+    color: #b0b0b0;
+    border: 1px solid #484848;
+    border-radius: 6px;
+    padding: 4px 12px;
+    font-size: 18px;
+    font-weight: normal;
+    min-width: 28px;
+    max-width: 28px;
 }
 QPushButton#newDialogueBtn:hover {
-    background-color: #38a169;
+    background-color: #2a2a2a;
+    color: #e0e0e0;
+    border-color: #666666;
 }
 QPushButton#deleteBtn {
-    background-color: #ef4444;
+    background-color: #c0392b;
     color: #ffffff;
     border: none;
-    border-radius: 3px;
-    padding: 5px 8px;
-    font-size: 11px;
+    border-radius: 50%;
+    padding: 2px;
+    font-size: 12px;
+    min-width: 22px;
+    max-width: 22px;
+    min-height: 22px;
+    max-height: 22px;
 }
 QPushButton#deleteBtn:hover {
-    background-color: #dc2626;
+    background-color: #e74c3c;
 }
 QPushButton#copyBtn {
     background-color: transparent;
-    color: #999999;
-    border: 1px solid #555555;
-    border-radius: 3px;
-    padding: 2px 8px;
-    font-size: 10px;
+    color: #888888;
+    border: 1px solid #444444;
+    border-radius: 4px;
+    padding: 2px 10px;
+    font-size: 11px;
 }
 QPushButton#copyBtn:hover {
-    background-color: #404040;
-    color: #ffffff;
-    border-color: #777777;
+    background-color: #333333;
+    color: #cccccc;
+    border-color: #666666;
 }
 QScrollArea {
     border: none;
-    background-color: #1a1a1a;
+    background-color: #1e1e1e;
 }
 QScrollBar:vertical {
-    background-color: #1a1a1a;
+    background-color: #1e1e1e;
     width: 8px;
     border-radius: 4px;
 }
@@ -220,10 +240,26 @@ QScrollBar::handle:vertical {
     min-height: 30px;
 }
 QScrollBar::handle:vertical:hover {
-    background-color: #555555;
+    background-color: #585858;
 }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
     height: 0px;
+}
+/* ---- Input section label style ---- */
+QLabel#inputLabel {
+    color: #d4a017;
+    font-size: 13px;
+    font-weight: bold;
+}
+/* ---- Chat area role labels ---- */
+QLabel#roleLabel {
+    color: #e0e0e0;
+    font-size: 14px;
+    font-weight: bold;
+}
+QLabel#thinkingLabel {
+    color: #888888;
+    font-size: 12px;
 }
 """
 
@@ -348,8 +384,8 @@ class ChatBubble(QtWidgets.QFrame):
         if is_user:
             # ---- User message: compact bar, right-aligned, max 3 lines ----
             self.setStyleSheet(
-                "QFrame { background-color: #2a2a2a; border: none; "
-                "border-radius: 16px; padding: 0px; }"
+                "QFrame { background-color: #2d2d2d; border: 1px solid #3a3a3a; "
+                "border-radius: 12px; padding: 0px; }"
             )
             # Shrink-to-content but cap at a reasonable max
             self.setSizePolicy(QtWidgets.QSizePolicy.Preferred,
@@ -412,40 +448,71 @@ class ChatBubble(QtWidgets.QFrame):
             self._apply_collapsed_text(text)
 
         else:
-            # ---- Gemini message: original card style ----
+            # ---- Gemini message: clean flat style matching Google Gemini UI ----
             self.setStyleSheet(
-                "QFrame { background-color: #333333; border-radius: 8px; padding: 8px; }"
+                "QFrame { background-color: transparent; border: none; }"
             )
 
             layout = QtWidgets.QVBoxLayout(self)
-            layout.setContentsMargins(10, 6, 10, 6)
-            layout.setSpacing(4)
+            layout.setContentsMargins(8, 4, 8, 4)
+            layout.setSpacing(6)
 
-            # Role label
-            role_label = QtWidgets.QLabel("Gemini")
-            role_label.setStyleSheet(
-                "color: #66bb6a; font-size: 10px; font-weight: bold;"
+            # Top row: copy icon (left) + "Gemini:" label
+            top_row = QtWidgets.QHBoxLayout()
+            top_row.setSpacing(8)
+
+            # Left: copy icon button
+            copy_icon_btn = QtWidgets.QPushButton()
+            copy_icon_btn.setFixedSize(24, 24)
+            copy_icon_btn.setToolTip("Copy to clipboard")
+            copy_icon_btn.setCursor(QtCore.Qt.PointingHandCursor)
+            copy_icon_btn.setStyleSheet(
+                "QPushButton { background: transparent; border: none; padding: 0px; }"
+                "QPushButton:hover { background: #333333; border-radius: 12px; }"
             )
-            layout.addWidget(role_label)
+            btn_icon_layout = QtWidgets.QHBoxLayout(copy_icon_btn)
+            btn_icon_layout.setContentsMargins(4, 4, 4, 4)
+            _copy_icon = _CopyIconWidget(size=16, color="#888888")
+            btn_icon_layout.addWidget(_copy_icon)
+            copy_icon_btn.clicked.connect(self._copy_text)
+            self._copy_icon_widget = _copy_icon
+            top_row.addWidget(copy_icon_btn, 0, QtCore.Qt.AlignTop)
+
+            # Right column: label + thinking toggle + text
+            right_col = QtWidgets.QVBoxLayout()
+            right_col.setSpacing(4)
+            right_col.setContentsMargins(0, 0, 0, 0)
+
+            # "Gemini:" label
+            role_label = QtWidgets.QLabel("Gemini:")
+            role_label.setObjectName("roleLabel")
+            right_col.addWidget(role_label)
+
+            # "显示思路" dropdown toggle
+            think_row = QtWidgets.QHBoxLayout()
+            think_row.setContentsMargins(0, 0, 0, 0)
+            think_row.setSpacing(4)
+            think_label = QtWidgets.QLabel("显示思路")
+            think_label.setObjectName("thinkingLabel")
+            think_row.addWidget(think_label)
+            think_arrow = QtWidgets.QLabel("▼")
+            think_arrow.setStyleSheet("color: #888888; font-size: 10px;")
+            think_row.addWidget(think_arrow)
+            think_row.addStretch()
+            right_col.addLayout(think_row)
 
             # Message text
             self.msg_label = QtWidgets.QLabel(text)
             self.msg_label.setWordWrap(True)
             self.msg_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-            self.msg_label.setStyleSheet("color: #eeeeee; font-size: 12px; background: transparent;")
-            layout.addWidget(self.msg_label)
+            self.msg_label.setStyleSheet(
+                "color: #d0d0d0; font-size: 13px; background: transparent;"
+                "line-height: 1.5; padding: 2px 0px;"
+            )
+            right_col.addWidget(self.msg_label)
 
-            # Copy button
-            copy_row = QtWidgets.QHBoxLayout()
-            copy_row.setContentsMargins(0, 2, 0, 0)
-            copy_row.addStretch()
-            self._copy_btn = QtWidgets.QPushButton("📋 Copy")
-            self._copy_btn.setObjectName("copyBtn")
-            self._copy_btn.setToolTip("Copy this response to clipboard")
-            self._copy_btn.setCursor(QtCore.Qt.PointingHandCursor)
-            self._copy_btn.clicked.connect(self._copy_text)
-            copy_row.addWidget(self._copy_btn)
-            layout.addLayout(copy_row)
+            top_row.addLayout(right_col, 1)
+            layout.addLayout(top_row)
 
     # ---- User bubble: collapse / expand helpers ----------------------------
 
@@ -525,6 +592,12 @@ class ChatBubble(QtWidgets.QFrame):
             self._copy_icon.set_color("#66bb6a")  # green flash
             QtCore.QTimer.singleShot(1500, lambda: (
                 self._copy_icon.set_color("#888888") if _isValid(self._copy_icon) else None
+            ))
+        elif self.role != "user" and hasattr(self, "_copy_icon_widget") and _isValid(self._copy_icon_widget):
+            # Gemini bubble copy icon feedback
+            self._copy_icon_widget.set_color("#66bb6a")
+            QtCore.QTimer.singleShot(1500, lambda: (
+                self._copy_icon_widget.set_color("#888888") if _isValid(self._copy_icon_widget) else None
             ))
         elif hasattr(self, "_copy_btn") and _isValid(self._copy_btn):
             self._copy_btn.setText("✓ Copied")
@@ -777,7 +850,7 @@ class ImageStrip(QtWidgets.QWidget):
         self._scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self._scroll.setFixedHeight(72)
         self._scroll.setStyleSheet(
-            "QScrollArea { background: transparent; border: none; }"
+            "QScrollArea { background: #252525; border: 1px solid #333333; border-radius: 8px; }"
         )
 
         # Inner container widget + layout for the thumbnail cards
@@ -796,9 +869,9 @@ class ImageStrip(QtWidgets.QWidget):
         self._add_btn.setFixedSize(40, 40)
         self._add_btn.setToolTip("Add local file (images & documents)")
         self._add_btn.setStyleSheet(
-            "QPushButton { background: #333; color: #e74c3c; border: 2px solid #555; "
-            "border-radius: 6px; font-size: 22px; font-weight: bold; }"
-            "QPushButton:hover { background: #444; border-color: #e74c3c; }"
+            "QPushButton { background: #2a2a2a; color: #888888; border: 1px solid #444444; "
+            "border-radius: 6px; font-size: 20px; font-weight: bold; }"
+            "QPushButton:hover { background: #333333; color: #bbbbbb; border-color: #666666; }"
         )
         if self._add_callback:
             self._add_btn.clicked.connect(self._add_callback)
@@ -1261,26 +1334,22 @@ class GeminiChatPanel(QtWidgets.QWidget):
         root_layout.setContentsMargins(8, 8, 8, 8)
         root_layout.setSpacing(6)
 
-        # ---- Top bar: session management ----
+        # ---- Top bar: + button + session dropdown ----
         top_bar = QtWidgets.QHBoxLayout()
-        top_bar.setSpacing(6)
+        top_bar.setSpacing(8)
 
-        new_btn = QtWidgets.QPushButton("New Dialogue")
+        # "+" new dialogue button (compact, icon-style)
+        new_btn = QtWidgets.QPushButton("+")
         new_btn.setObjectName("newDialogueBtn")
+        new_btn.setToolTip("New Dialogue")
         new_btn.clicked.connect(self._new_dialogue)
         top_bar.addWidget(new_btn)
 
+        # Session selector (dropdown, takes remaining space)
         self._session_combo = QtWidgets.QComboBox()
         self._session_combo.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self._session_combo.currentIndexChanged.connect(self._on_session_selected)
         top_bar.addWidget(self._session_combo)
-
-        del_btn = QtWidgets.QPushButton("🗑")
-        del_btn.setObjectName("deleteBtn")
-        del_btn.setFixedWidth(32)
-        del_btn.setToolTip("Delete current session")
-        del_btn.clicked.connect(self._delete_current_session)
-        top_bar.addWidget(del_btn)
 
         root_layout.addLayout(top_bar)
 
@@ -1291,24 +1360,33 @@ class GeminiChatPanel(QtWidgets.QWidget):
         self._scroll_area.setFocusPolicy(QtCore.Qt.StrongFocus)
 
         self._chat_container = QtWidgets.QWidget()
+        self._chat_container.setStyleSheet("QWidget { background-color: #222222; }")
         self._chat_layout = QtWidgets.QVBoxLayout(self._chat_container)
-        self._chat_layout.setContentsMargins(4, 4, 4, 4)
-        self._chat_layout.setSpacing(8)
+        self._chat_layout.setContentsMargins(6, 6, 6, 6)
+        self._chat_layout.setSpacing(10)
         self._chat_layout.addStretch()
+
+        # Chat scroll area — dark background matching target UI
+        self._scroll_area.setStyleSheet(
+            "QScrollArea { background-color: #222222; border: none; }"
+        )
 
         self._scroll_area.setWidget(self._chat_container)
         root_layout.addWidget(self._scroll_area, 1)
 
         # ---- Input section ----
         input_section = QtWidgets.QVBoxLayout()
-        input_section.setSpacing(4)
+        input_section.setSpacing(6)
+        input_section.setContentsMargins(0, 4, 0, 0)
 
-        # Row 1: Input label + Select(Nuke node) + Paste + stretch + Model combo
+        # Row 1: "Input" label + Select + Paste + image strip + stretch + Model combo
         toolbar_row = QtWidgets.QHBoxLayout()
-        toolbar_row.setSpacing(4)
+        toolbar_row.setSpacing(6)
+        toolbar_row.setAlignment(QtCore.Qt.AlignVCenter)
 
+        # "Input" label (yellow/gold like target UI)
         input_label = QtWidgets.QLabel("Input")
-        input_label.setStyleSheet("color: #aaa; font-size: 11px; font-weight: bold;")
+        input_label.setObjectName("inputLabel")
         toolbar_row.addWidget(input_label)
 
         select_btn = QtWidgets.QPushButton("Select")
@@ -1323,10 +1401,13 @@ class GeminiChatPanel(QtWidgets.QWidget):
         paste_btn.clicked.connect(self._paste_image)
         toolbar_row.addWidget(paste_btn)
 
-        toolbar_row.addStretch()
+        # Image strip (thumbnails + "+" add button) — inline with buttons
+        self._image_strip = ImageStrip(add_callback=self._select_image)
+        toolbar_row.addWidget(self._image_strip, 1)
 
+        # Model selector on the right
         self._model_combo = QtWidgets.QComboBox()
-        self._model_combo.setMinimumWidth(140)
+        self._model_combo.setMinimumWidth(130)
         for m in CHAT_MODELS:
             self._model_combo.addItem(m)
         self._model_combo.currentIndexChanged.connect(self._on_model_changed)
@@ -1334,18 +1415,14 @@ class GeminiChatPanel(QtWidgets.QWidget):
 
         input_section.addLayout(toolbar_row)
 
-        # Row 2: Image strip (thumbnails + "+" add button at the end, same row as Select/Paste)
-        self._image_strip = ImageStrip(add_callback=self._select_image)
-        input_section.addWidget(self._image_strip)
-
-        # Row 3: Text input
+        # Row 2: Text input
         self._text_input = QtWidgets.QPlainTextEdit()
         self._text_input.setPlaceholderText("Please enter the question...")
-        self._text_input.setFixedHeight(80)
+        self._text_input.setFixedHeight(70)
         self._text_input.installEventFilter(self)
         input_section.addWidget(self._text_input)
 
-        # Send button
+        # Send button (gray style matching target)
         self._send_btn = QtWidgets.QPushButton("Send")
         self._send_btn.setObjectName("sendBtn")
         self._send_btn.clicked.connect(self._send_message)
@@ -1353,7 +1430,7 @@ class GeminiChatPanel(QtWidgets.QWidget):
 
         # Status label
         self._status_label = QtWidgets.QLabel("")
-        self._status_label.setStyleSheet("color: #888; font-size: 10px;")
+        self._status_label.setStyleSheet("color: #666666; font-size: 11px;")
         self._status_label.setWordWrap(True)
         input_section.addWidget(self._status_label)
 
