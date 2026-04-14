@@ -1949,8 +1949,8 @@ class GeminiChatPanel(QtWidgets.QWidget):
             # Calculate usable width from the visible chat area
             area_w = self._scroll_area.viewport().width()
             scroll_w = self._scroll_area.width()
-            # Max bubble width: ~80% of chat area so user bubbles fill most of the space
-            max_bubble_w = max(160, int(area_w * 0.80))
+            # Max bubble width: ~62% of chat area for long text user bubbles
+            max_bubble_w = max(160, int(area_w * 0.62))
 
             # Padding inside user bubble: contentsMargins(12,6,12,6) + spacing(6) ≈ 36
             inner_pad_user = 36
