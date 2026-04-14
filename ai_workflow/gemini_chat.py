@@ -1654,15 +1654,15 @@ class GeminiChatPanel(QtWidgets.QWidget):
         input_section.setSpacing(6)
         input_section.setContentsMargins(0, 4, 0, 0)
 
-        # Row 1: "Input" label + Select + Paste + image strip + stretch + Model combo
+        # Row 1: "Input" label only
+        input_label = QtWidgets.QLabel("Input")
+        input_label.setObjectName("inputLabel")
+        input_section.addWidget(input_label)
+
+        # Row 2: Select + Paste + image strip + Model combo (inside a bordered container)
         toolbar_row = QtWidgets.QHBoxLayout()
         toolbar_row.setSpacing(6)
         toolbar_row.setAlignment(QtCore.Qt.AlignVCenter)
-
-        # "Input" label (yellow/gold like target UI)
-        input_label = QtWidgets.QLabel("Input")
-        input_label.setObjectName("inputLabel")
-        toolbar_row.addWidget(input_label)
 
         select_btn = QtWidgets.QPushButton("Select")
         select_btn.setObjectName("actionBtn")
@@ -1676,7 +1676,7 @@ class GeminiChatPanel(QtWidgets.QWidget):
         paste_btn.clicked.connect(self._paste_image)
         toolbar_row.addWidget(paste_btn)
 
-        # Image strip (thumbnails + "+" add button) — inline with buttons
+        # Image strip (thumbnails + "+" add button)
         self._image_strip = ImageStrip(add_callback=self._select_image)
         toolbar_row.addWidget(self._image_strip, 1)
 
