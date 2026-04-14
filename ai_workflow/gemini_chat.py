@@ -386,7 +386,7 @@ class _CopyIconWidget(QtWidgets.QWidget):
 class ChatBubble(QtWidgets.QFrame):
     """A single chat message bubble."""
 
-    _MAX_USER_LINES = 3  # User bubble collapsed line limit
+    _MAX_USER_LINES = 2  # User bubble collapsed line limit
 
     def __init__(self, role, text, images=None, parent=None):
         super(ChatBubble, self).__init__(parent)
@@ -560,13 +560,46 @@ class ChatBubble(QtWidgets.QFrame):
         return total_lines > self._MAX_USER_LINES
 
     def _collapsed_text(self, text):
-        """Return the first _MAX_USER_LINES logical lines, trimmed."""
+        """Return text truncated to fit within ~_MAX_USER_LINES visual lines,
+        ending with '...' if content was cut."""
+        fm = QtGui.QFontMetrics(self.msg_label.font())
+        max_w = self.msg_label.maximumWidth()
+        if max_w >= 16777215:
+            max_w = self.maximumWidth() - 36  # subtract inner padding
+        if max_w < 50:
+            max_w = 300
+
+        suffix = "..."
         lines = text.split("\n")
-        kept = lines[:self._MAX_USER_LINES]
-        result = "\n".join(kept)
-        if len(result) > 200:
-            result = result[:200]
-        return result + " …"
+        result_lines = []
+        total_chars = 0
+        for line in lines:
+            # Check if adding this line exceeds visual line limit
+            if not line:
+                result_lines.append("")
+                total_chars += 1
+                continue
+            # How many visual lines does this line take?
+            line_w = fm.horizontalAdvance(line) if hasattr(fm, 'horizontalAdvance') else fm.width(line)
+            vis_lines = max(1, int((line_w + max_w - 1) / max_w)) if line else 1
+
+            # Count current total visual lines so far
+            current_vis = sum(
+                max(1, int(((fm.horizontalAdvance(l) if hasattr(fm, 'horizontalAdvance') else fm.width(l)) + max_w - 1) / max_w)) if l else 1
+                for l in result_lines
+            )
+            if current_vis + vis_lines > self._MAX_USER_LINES:
+                # This line would exceed — truncate it to fit remaining space
+                remaining = self._MAX_USER_LINES - current_vis
+                avail_chars = int(max_w * remaining / (fm.averageCharWidth() or 8))
+                truncated = line[:max(avail_chars - len(suffix), 10)] + suffix
+                result_lines.append(truncated)
+                break
+            else:
+                result_lines.append(line)
+
+        result = "\n".join(result_lines)
+        return result
 
     def _apply_collapsed_text(self, text):
         """Set label text, show/hide toggle button."""
@@ -579,7 +612,11 @@ class ChatBubble(QtWidgets.QFrame):
                    needs, self._is_collapsed)
         if needs:
             if self._is_collapsed:
-                self.msg_label.setText(self._collapsed_text(text))
+                collapsed = self._collapsed_text(text)
+                # Always append ... suffix when collapsed
+                if not collapsed.endswith("..."):
+                    collapsed = collapsed + "..."
+                self.msg_label.setText(collapsed)
                 self._toggle_btn.setText("▼")
                 self._toggle_btn.setToolTip("Expand")
             else:
@@ -1912,11 +1949,12 @@ class GeminiChatPanel(QtWidgets.QWidget):
             # Calculate usable width from the visible chat area
             area_w = self._scroll_area.viewport().width()
             scroll_w = self._scroll_area.width()
-            max_bubble_w = max(300, int(area_w * 0.85))
+            # Max bubble width: ~80% of chat area so user bubbles fill most of the space
+            max_bubble_w = max(160, int(area_w * 0.80))
 
-            # Padding inside bubble: contentsMargins(12,6,12,6) + copy-btn(22) + spacing(6) = 52
-            inner_pad = 52
-            label_max_w = max(200, max_bubble_w - inner_pad)
+            # Padding inside user bubble: contentsMargins(12,6,12,6) + spacing(6) ≈ 36
+            inner_pad_user = 36
+            label_max_w = max(60, max_bubble_w - inner_pad_user)
 
             if hasattr(bubble, 'msg_label'):
                 lbl = bubble.msg_label
@@ -1933,23 +1971,33 @@ class GeminiChatPanel(QtWidgets.QWidget):
 
                 # The bubble width should be:
                 #  - at least 80 px (for very short text)
-                #  - at most label_max_w (85% of viewport minus padding)
+                #  - at most max_bubble_w (~55% of viewport)
                 #  - ideally = natural text width (so short msgs stay compact)
-                ideal_label_w = min(max_text_w + 4, label_max_w)  # +4 for rounding
-                ideal_bubble_w = ideal_label_w + inner_pad
+                ideal_label_w = min(max_text_w + 4, label_max_w)
+                ideal_bubble_w = ideal_label_w + inner_pad_user
 
                 # Clamp
-                ideal_bubble_w = max(80, min(ideal_bubble_w, max_bubble_w))
+                ideal_bubble_w = max(70, min(ideal_bubble_w, max_bubble_w))
 
-                # Set the label's maximumWidth so word-wrap uses it
-                lbl.setMaximumWidth(ideal_label_w)
-                # Use setMaximumWidth instead of setFixedWidth so bubbles
-                # can adapt when the window is resized smaller
-                bubble.setMaximumWidth(ideal_bubble_w)
+                # Set the label's maximumWidth first so word-wrap works correctly
+                lbl.setMaximumWidth(label_max_w)
 
-                # Re-evaluate collapsed text now that label has correct width
+                # Re-evaluate collapsed text NOW (before deciding width strategy)
                 if hasattr(bubble, '_apply_collapsed_text') and hasattr(bubble, '_full_text'):
                     bubble._apply_collapsed_text(bubble._full_text)
+
+                # After collapse, decide width strategy:
+                # Long text (collapsed): FIX width so bubble stays wide & shows 2 lines + ...
+                # Short text (no collapse): use MAX width so it shrinks to content
+                needs_collapse = bubble._is_collapsed and (
+                    len(bubble._full_text if hasattr(bubble, '_full_text') else '') > 60
+                )
+                if needs_collapse:
+                    # Force wide bubble for collapsed long text — matches red-box target UI
+                    bubble.setFixedWidth(min(ideal_bubble_w, max_bubble_w))
+                    lbl.setMinimumWidth(int(max_bubble_w * 0.5))
+                else:
+                    bubble.setMaximumWidth(ideal_bubble_w)
 
                 _log.debug("[_insert_bubble_widget] role=user | "
                            "scroll_area.width()=%d | viewport.width()=%d | "
