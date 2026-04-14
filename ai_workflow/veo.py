@@ -2522,7 +2522,14 @@ class VeoWidget(QtWidgets.QWidget):
         model_name = self.model_combo.currentText()
         ratio = self.ratio_combo.currentText()
         duration = self.dur_combo.currentData() or self.dur_combo.currentText()
-        resolution = self.res_combo.currentText()
+        resolution = self.res_combo.currentText().lower()
+        current_mode = self.mode_combo.currentData() or VEO_MODE_TEXT
+
+        # Enforce API constraints before generation
+        if resolution in ("1080p", "4k"):
+            duration = "8"
+        elif current_mode == VEO_MODE_FRAMES:
+            duration = "8"
 
         self._toggle_stop_ui(True)
         self.status_label.setText("Starting generation...")
@@ -3288,8 +3295,14 @@ class VeoRecordWidget(QtWidgets.QWidget):
         model_name = self.model_combo.currentText()
         ratio = self.ratio_combo.currentText()
         duration = self.dur_combo.currentData() or self.dur_combo.currentText()
-        resolution = self.res_combo.currentText()
+        resolution = self.res_combo.currentText().lower()
         current_mode = self.mode_combo.currentData() or VEO_MODE_TEXT
+
+        # Enforce API constraints before generation
+        if resolution in ("1080p", "4k"):
+            duration = "8"
+        elif current_mode == VEO_MODE_FRAMES:
+            duration = "8"
 
         # Collect reference images from the ImageStrip (UI source of truth)
         reference_image_paths = []
