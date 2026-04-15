@@ -2021,67 +2021,65 @@ class GeminiChatPanel(QtWidgets.QWidget):
     def _insert_bubble_widget(self, bubble, role):
         """Insert a bubble into the chat layout.
         User bubbles are right-aligned with a computed fixed width so the
-        text fills the available space instead of collapsing to minimum."""
+        text fills the available space instead of collapsing to minimum.
+
+        Width strategy — all user bubbles use FIXED width to prevent
+        Qt's size-hint shrinking from causing runaway line-wrapping:
+        ── Set label max_width → evaluate collapse → decide mode:
+        ├── Long/medium text (needs_collapse): setFixedWidth(~447) — wide bubble, 2 lines + ...
+        └── Truly short text (single line): setFixedWidth(natural) — compact but stable
+        """
         if role == "user":
             # Calculate usable width from the visible chat area
             area_w = self._scroll_area.viewport().width()
-            scroll_w = self._scroll_area.width()
-            # Max bubble width: ~62% of chat area for long text user bubbles
-            max_bubble_w = max(160, int(area_w * 0.62))
+            # Max bubble width: ~80% of chat area for wider user bubbles
+            max_bubble_w = max(200, int(area_w * 0.80))
 
             # Padding inside user bubble: contentsMargins(12,6,12,6) + spacing(6) ≈ 36
             inner_pad_user = 36
-            label_max_w = max(60, max_bubble_w - inner_pad_user)
+            label_max_w = max(80, max_bubble_w - inner_pad_user)
 
             if hasattr(bubble, 'msg_label'):
                 lbl = bubble.msg_label
-                fm = QtGui.QFontMetrics(lbl.font())
-                text = lbl.text()
 
-                # Compute the natural (no-wrap) width of each line,
-                # then pick the widest one.
-                raw_lines = text.split("\n")
-                max_text_w = 0
-                for raw_line in raw_lines:
-                    w = fm.horizontalAdvance(raw_line) if hasattr(fm, 'horizontalAdvance') else fm.width(raw_line)
-                    max_text_w = max(max_text_w, w)
-
-                # The bubble width should be:
-                #  - at least 80 px (for very short text)
-                #  - at most max_bubble_w (~55% of viewport)
-                #  - ideally = natural text width (so short msgs stay compact)
-                ideal_label_w = min(max_text_w + 4, label_max_w)
-                ideal_bubble_w = ideal_label_w + inner_pad_user
-
-                # Clamp
-                ideal_bubble_w = max(70, min(ideal_bubble_w, max_bubble_w))
-
-                # Set the label's maximumWidth first so word-wrap works correctly
+                # Step 1: Set label's maximumWidth FIRST so word-wrap works correctly
                 lbl.setMaximumWidth(label_max_w)
 
-                # Re-evaluate collapsed text NOW (before deciding width strategy)
+                # Step 2: Re-evaluate collapsed text NOW (before deciding width strategy)
                 if hasattr(bubble, '_apply_collapsed_text') and hasattr(bubble, '_full_text'):
                     bubble._apply_collapsed_text(bubble._full_text)
 
-                # After collapse, decide width strategy:
-                # Long text (collapsed): FIX width so bubble stays wide & shows 2 lines + ...
-                # Short text (no collapse): use MAX width so it shrinks to content
-                needs_collapse = bubble._is_collapsed and (
-                    len(bubble._full_text if hasattr(bubble, '_full_text') else '') > 60
+                # Step 3: Decide width strategy based on whether text needs collapsing
+                needs_collapse = (
+                    bubble._is_collapsed and
+                    hasattr(bubble, '_full_text') and
+                    bubble._needs_collapse(bubble._full_text)
                 )
+
                 if needs_collapse:
-                    # Force wide bubble for collapsed long text — matches red-box target UI
-                    bubble.setFixedWidth(min(ideal_bubble_w, max_bubble_w))
-                    lbl.setMinimumWidth(int(max_bubble_w * 0.5))
+                    # Long text (collapsed): force WIDE fixed-width bubble so it stays
+                    # wide & shows exactly 2 lines + ... with ▼ expand icon
+                    bubble.setFixedWidth(min(max_bubble_w, 447))
+                    lbl.setMinimumWidth(int(label_max_w * 0.5))
                 else:
-                    bubble.setMaximumWidth(ideal_bubble_w)
+                    # Short text (no collapse): still use FIXED width (not Maximum!)
+                    # to prevent Qt from shrinking the bubble and causing extra wrapping.
+                    # Size it to natural text width + padding.
+                    fm = QtGui.QFontMetrics(lbl.font())
+                    full_text = bubble._full_text if hasattr(bubble, '_full_text') else ''
+                    raw_lines = full_text.split('\n')
+                    nat_w = 0
+                    for rl in raw_lines:
+                        w = fm.horizontalAdvance(rl) if hasattr(fm, 'horizontalAdvance') else fm.width(rl)
+                        nat_w = max(nat_w, w)
+                    ideal_bubble_w = min(max(nat_w + inner_pad_user + 8, 70), max_bubble_w)
+                    bubble.setFixedWidth(int(ideal_bubble_w))
 
                 _log.debug("[_insert_bubble_widget] role=user | "
-                           "scroll_area.width()=%d | viewport.width()=%d | "
-                           "max_bubble_w=%d | label_max_w=%d | "
-                           "max_text_w=%d | ideal_label_w=%d | ideal_bubble_w=%d",
-                           scroll_w, area_w, max_bubble_w, label_max_w,
-                           max_text_w, ideal_label_w, ideal_bubble_w)
+                           "area_w=%d | max_bubble_w=%d | label_max_w=%d | "
+                           "needs_collapse=%s | is_collapsed=%s",
+                           area_w, max_bubble_w, label_max_w,
+                           needs_collapse, bubble._is_collapsed)
 
             # Use wrapper + layout with AlignRight to position the fixed-width bubble
             wrapper = QtWidgets.QWidget()
