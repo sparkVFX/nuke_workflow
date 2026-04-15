@@ -1748,8 +1748,11 @@ class GeminiChatPanel(QtWidgets.QWidget):
         self._session_mgr = SessionManager()
         self._current_session = None  # dict
         self._is_sending = False
+        self._cancel_requested = False       # ESC cancellation flag (checked by stream thread)
+        self._status_task_id = None          # global status bar task ID
 
         self._build_ui()
+        self._setup_esc_shortcut()
         self._refresh_session_list()
 
         # Auto-load last session or create new
@@ -1895,6 +1898,47 @@ class GeminiChatPanel(QtWidgets.QWidget):
                     self._send_message()
                     return True
         return super(GeminiChatPanel, self).eventFilter(obj, event)
+
+    # ---- ESC shortcut to cancel streaming -----------------------------------
+
+    def _setup_esc_shortcut(self):
+        """Install a global ESC QShortcut on the panel so users can cancel
+        an in-flight Gemini request at any time."""
+        from ai_workflow.status_bar import task_progress_manager
+        esc = QtWidgets.QShortcut(
+            QtGui.QKeySequence(QtCore.Qt.Key_Escape), self
+        )
+        esc.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
+        esc.activated.connect(self._cancel_streaming)
+
+    def _cancel_streaming(self):
+        """Called by ESC or programmatically. Sets cancellation flag and
+        updates both the panel status label and the global status bar."""
+        if not self._is_sending:
+            return
+
+        self._cancel_requested = True
+        self._status_label.setText("Cancelling... (pressing ESC)")
+        self._status_label.setStyleSheet("color: #ef4444; font-size: 11px;")
+
+        # Update global status bar to show cancelling state
+        if self._status_task_id:
+            try:
+                from ai_workflow.status_bar import task_progress_manager as _tpm
+                _tpm.update_status(
+                    self._status_task_id, "Cancelling...", progress=-1
+                )
+            except Exception:
+                pass
+
+    def keyPressEvent(self, event):
+        """Handle ESC key press for cancellation (fallback when text input
+        does not have focus)."""
+        if event.key() == QtCore.Qt.Key_Escape and self._is_sending:
+            self._cancel_streaming()
+            event.accept()
+            return
+        super(GeminiChatPanel, self).keyPressEvent(event)
 
     # ---- Session management ------------------------------------------------
 
@@ -2259,9 +2303,22 @@ class GeminiChatPanel(QtWidgets.QWidget):
 
         # Show loading
         self._is_sending = True
+        self._cancel_requested = False
         self._send_btn.setEnabled(False)
         self._send_btn.setText("Sending...")
         self._status_label.setText("Waiting for Gemini response...")
+
+        # Register in global status bar (like NanoBanana / VEO do)
+        try:
+            from ai_workflow.status_bar import task_progress_manager
+            self._status_task_id = task_progress_manager.add_task(
+                "Gemini Chat", "image"
+            )
+            task_progress_manager.update_status(
+                self._status_task_id, "Talking to Gemini...", progress=-1
+            )
+        except Exception:
+            self._status_task_id = None
 
         # Create an empty assistant bubble for streaming (no blinking cursor)
         self._streaming_bubble = self._add_bubble("model", "")
@@ -2338,6 +2395,10 @@ class GeminiChatPanel(QtWidgets.QWidget):
                 model=model,
                 contents=contents,
             ):
+                # Check if user pressed ESC to cancel
+                if self._cancel_requested:
+                    self._stream_finish(full_text or "(Cancelled)", error=True)
+                    return
                 if chunk.text:
                     full_text += chunk.text
                     self._stream_update_chunk(full_text)
@@ -2383,20 +2444,57 @@ class GeminiChatPanel(QtWidgets.QWidget):
             if hasattr(self, "_streaming_bubble") and self._streaming_bubble and _isValid(self._streaming_bubble):
                 self._streaming_bubble.set_text(final_text)
 
-            # Save assistant message to session
-            if self._current_session is not None:
+            # Determine if this was a user cancellation
+            was_cancelled = self._cancel_requested
+
+            # Save assistant message to session (unless cancelled with no content)
+            if self._current_session is not None and not (was_cancelled and not final_text.strip()):
                 assistant_msg = {"role": "model", "text": final_text, "images": []}
                 self._current_session["messages"].append(assistant_msg)
                 self._session_mgr.save_session(self._current_session)
 
+            # Clean up streaming state
             self._streaming_bubble = None
             self._streaming_text = ""
             self._is_sending = False
+            self._cancel_requested = False
+
+            # Reset send button
             self._send_btn.setEnabled(True)
             self._send_btn.setText("Send")
-            self._status_label.setText(
-                "Error occurred" if error else "Response received"
-            )
+
+            # Update panel status label + global status bar
+            if was_cancelled:
+                self._status_label.setText("Cancelled by user")
+                self._status_label.setStyleSheet("color: #ef4444; font-size: 11px;")
+            elif error:
+                self._status_label.setText("Error occurred")
+                self._status_label.setStyleSheet("color: #ef4444; font-size: 11px;")
+            else:
+                self._status_label.setText("Response received")
+                self._status_label.setStyleSheet("color: #666666; font-size: 11px;")
+
+            # Complete / cancel global status bar task
+            if self._status_task_id:
+                try:
+                    from ai_workflow.status_bar import task_progress_manager as _tpm
+                    if was_cancelled:
+                        _tpm.cancel_task(
+                            self._status_task_id,
+                            "Cancelled by user"
+                        )
+                    elif error:
+                        _tpm.error_task(
+                            self._status_task_id, final_text[:80]
+                        )
+                    else:
+                        _tpm.complete_task(
+                            self._status_task_id, "Done!"
+                        )
+                except Exception:
+                    pass
+                self._status_task_id = None
+
             self._scroll_to_bottom()
 
         try:
