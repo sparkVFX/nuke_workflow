@@ -2034,21 +2034,69 @@ class VeoWidget(QtWidgets.QWidget):
 
         self.prompt_mode_combo = DropDownComboBox()
         self.prompt_mode_combo.addItems(["Enter", "Standard"])
-        self.prompt_mode_combo.currentIndexChanged.connect(lambda _: self._save_all_state_to_node())
+        self.prompt_mode_combo.currentIndexChanged.connect(self._on_prompt_mode_changed)
         row_hist.addWidget(self.prompt_mode_combo)
 
         main.addLayout(row_hist)
 
-        # === Prompt ===
+        # === Prompt: Enter mode (single large QTextEdit) ===
         self.prompt_edit = QtWidgets.QTextEdit()
         self.prompt_edit.setPlaceholderText("Enter your creative prompt here...")
         self.prompt_edit.setMinimumHeight(120)
         self.prompt_edit.textChanged.connect(self._save_all_state_to_node)
         main.addWidget(self.prompt_edit)
 
-        # === Negative Prompt ===
+        # === Prompt: Standard mode (structured fields) ===
+        self._std_prompt_container = QtWidgets.QWidget()
+        std_layout = QtWidgets.QFormLayout(self._std_prompt_container)
+        std_layout.setSpacing(4)
+        std_layout.setContentsMargins(0, 0, 0, 0)
+        std_layout.setLabelAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+
+        _STD_FIELDS = [
+            ("Subject:",      "subject",
+             "描述主要主体，例如：一只金毛幼犬",           False),
+            ("Action:",       "action",
+             "描述动作，例如：穿过一片野花田奔跑",          False),
+            ("Style:",        "style",
+             "描述视觉风格，例如：电影感、写实、动漫风格",    False),
+            ("Camera:",       "camera",
+             "（可选）相机位置和运动，例如：低角度跟拍镜头",   True),
+            ("Composition:",  "composition",
+             "（可选）构图方式，例如：三分法、居中构图",     True),
+            ("Lens Effects:", "lens",
+             "（可选）对焦和镜头效果，例如：浅景深、虚化光斑", True),
+            ("Mood:",         "mood",
+             "（可选）氛围和情绪，例如：温暖的金色时光光线",  True),
+        ]
+        self._std_field_keys = []        # ordered list of attr names
+        self._std_field_widgets = {}     # key -> QLineEdit
+        for label_text, key, placeholder, _optional in _STD_FIELDS:
+            field = QtWidgets.QLineEdit()
+            field.setPlaceholderText(placeholder)
+            field.setStyleSheet(
+                "background: #2a2a2a; border: 1px solid #444; border-radius: 3px;"
+                " color: #ddd; padding: 4px 6px; font-size: 12px;"
+            )
+            field.textChanged.connect(self._save_all_state_to_node)
+            lbl = QtWidgets.QLabel(label_text)
+            lbl.setStyleSheet("color: #ccc; font-size: 12px; font-weight: bold;")
+            std_layout.addRow(lbl, field)
+            self._std_field_keys.append(key)
+            self._std_field_widgets[key] = field
+            setattr(self, "_std_{}".format(key), field)  # self._std_subject, etc.
+
+        self._std_prompt_container.setVisible(False)  # hidden by default (Enter mode)
+        main.addWidget(self._std_prompt_container)
+
+        # === Negative Prompt (shared by both modes) ===
+        self._neg_prompt_label = QtWidgets.QLabel("Negative Prompt:")
+        self._neg_prompt_label.setStyleSheet(
+            "color: #ccc; font-size: 12px; font-weight: bold;")
+        main.addWidget(self._neg_prompt_label)
+
         self.neg_prompt_edit = QtWidgets.QTextEdit()
-        self.neg_prompt_edit.setPlaceholderText("Negative Prompt (Optional)...")
+        self.neg_prompt_edit.setPlaceholderText("（可选）需要排除的内容，例如：模糊、变形、画质差")
         self.neg_prompt_edit.setMinimumHeight(80)
         self.neg_prompt_edit.textChanged.connect(self._save_all_state_to_node)
         main.addWidget(self.neg_prompt_edit)
@@ -2074,6 +2122,37 @@ class VeoWidget(QtWidgets.QWidget):
         self.status_label.setAlignment(QtCore.Qt.AlignCenter)
         self.status_label.setStyleSheet("color: #666; font-size: 11px;")
         main.addWidget(self.status_label)
+
+    # --- Prompt mode switching ------------------------------------------------
+
+    def _on_prompt_mode_changed(self, index):
+        """Toggle between Enter (free-text) and Standard (structured fields)."""
+        is_standard = (index == 1)
+        self.prompt_edit.setVisible(not is_standard)
+        self._std_prompt_container.setVisible(is_standard)
+        # Show/hide the "Negative Prompt:" label only in Standard mode
+        self._neg_prompt_label.setVisible(is_standard)
+        self._save_all_state_to_node()
+
+    def _get_assembled_prompt(self):
+        """Return the final prompt string based on the current prompt mode.
+
+        - **Enter** mode: returns ``prompt_edit.toPlainText()`` as-is.
+        - **Standard** mode: joins the non-empty structured fields with
+          ``, `` (comma + space) in order: Subject, Action, Style, Camera,
+          Composition, Lens Effects, Mood.
+        """
+        if self.prompt_mode_combo.currentIndex() == 0:
+            # Enter mode
+            return self.prompt_edit.toPlainText().strip()
+        else:
+            # Standard mode – join non-empty fields with comma
+            parts = []
+            for key in self._std_field_keys:
+                val = self._std_field_widgets[key].text().strip()
+                if val:
+                    parts.append(val)
+            return ", ".join(parts)
 
     # --- Mode switching ---
     def _on_mode_combo_changed(self, index):
@@ -2303,6 +2382,9 @@ class VeoWidget(QtWidgets.QWidget):
             self._ensure_text_knob(node, "veo_s_prompt", "s_prompt")
             self._ensure_text_knob(node, "veo_s_neg", "s_neg")
 
+            # Standard prompt fields (7 fields stored as pipe-separated string)
+            self._ensure_text_knob(node, "veo_s_stdfields", "s_stdfields")
+
             node["veo_s_model"].setValue(self.model_combo.currentIndex())
             node["veo_s_ratio"].setValue(self.ratio_combo.currentIndex())
             node["veo_s_res"].setValue(self.res_combo.currentIndex())
@@ -2311,6 +2393,12 @@ class VeoWidget(QtWidgets.QWidget):
             node["veo_s_pm"].setValue(self.prompt_mode_combo.currentIndex())
             node["veo_s_prompt"].setValue(self.prompt_edit.toPlainText())
             node["veo_s_neg"].setValue(self.neg_prompt_edit.toPlainText())
+
+            # Save Standard mode fields as pipe-delimited string
+            std_vals = "|".join(
+                self._std_field_widgets[k].text() for k in self._std_field_keys
+            )
+            node["veo_s_stdfields"].setValue(std_vals)
         except Exception as e:
             print("[VEO] _save_all_state_to_node error: {}".format(e))
 
@@ -2333,7 +2421,9 @@ class VeoWidget(QtWidgets.QWidget):
             widgets = [self.model_combo, self.ratio_combo, self.res_combo,
                        self.dur_combo, self.mode_combo, self.prompt_mode_combo,
                        self.prompt_edit, self.neg_prompt_edit]
-            for w in widgets:
+            # Also block signals on all standard-mode fields
+            std_widgets = list(self._std_field_widgets.values())
+            for w in widgets + std_widgets:
                 w.blockSignals(True)
 
             # Model
@@ -2382,13 +2472,26 @@ class VeoWidget(QtWidgets.QWidget):
                 if neg:
                     self.neg_prompt_edit.setText(neg)
 
-            for w in widgets:
+            # Standard mode fields (pipe-separated)
+            if "veo_s_stdfields" in node.knobs():
+                raw = node["veo_s_stdfields"].value()
+                if raw:
+                    vals = raw.split("|")
+                    for i, key in enumerate(self._std_field_keys):
+                        if i < len(vals):
+                            self._std_field_widgets[key].setText(vals[i])
+
+            for w in widgets + std_widgets:
                 w.blockSignals(False)
 
             # After restoring mode, update the node inputs accordingly
             mode = self.mode_combo.currentData() or VEO_MODE_TEXT
             self._update_node_inputs(mode)
             self._update_duration_for_mode(mode)
+
+            # Apply prompt mode visibility
+            pm_idx = self.prompt_mode_combo.currentIndex()
+            self._on_prompt_mode_changed(pm_idx)
 
             print("[VEO] State restored successfully")
 
@@ -2463,7 +2566,7 @@ class VeoWidget(QtWidgets.QWidget):
             self._toggle_stop_ui(False)
             return
 
-        prompt = self.prompt_edit.toPlainText().strip()
+        prompt = self._get_assembled_prompt()
         neg_prompt = self.neg_prompt_edit.toPlainText().strip()
         if not prompt:
             self.status_label.setText("Please enter a prompt")

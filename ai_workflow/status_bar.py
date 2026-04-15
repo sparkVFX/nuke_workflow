@@ -48,32 +48,38 @@ class _TaskProgressWidget(QtWidgets.QWidget):
 
     def _build_ui(self):
         layout = QtWidgets.QHBoxLayout(self)
-        layout.setContentsMargins(4, 0, 4, 0)
-        layout.setSpacing(6)
+        layout.setContentsMargins(2, 0, 4, 0)
+        layout.setSpacing(4)
 
         # AI icon/label
         self.icon_label = QtWidgets.QLabel("🤖")
-        self.icon_label.setStyleSheet("font-size: 13px; background: transparent;")
+        self.icon_label.setAlignment(
+            QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter)
+        self.icon_label.setStyleSheet("font-size: 12px; background: transparent;")
         layout.addWidget(self.icon_label)
 
-        # Task info label (shows task name + status text)
+        # Task name label (e.g. "[Gemini Chat]")
         self.info_label = QtWidgets.QLabel("")
+        self.info_label.setAlignment(
+            QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         self.info_label.setStyleSheet(
-            "color: #facc15; font-size: 11px; font-weight: bold; background: transparent;"
+            "color: #facc15; font-size: 11px; font-weight: bold;"
+            " background: transparent;"
         )
         layout.addWidget(self.info_label)
 
-        # Progress bar
+        # Progress bar (centered vertically with labels)
         self.progress_bar = QtWidgets.QProgressBar()
         self.progress_bar.setFixedWidth(160)
         self.progress_bar.setFixedHeight(14)
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(True)
+        self.progress_bar.setAlignment(QtCore.Qt.AlignCenter)
         self.progress_bar.setStyleSheet("""
             QProgressBar {
                 border: 1px solid #555;
-                border-radius: 4px;
+                border-radius: 3px;
                 background-color: #333;
                 text-align: center;
                 color: #eee;
@@ -81,13 +87,15 @@ class _TaskProgressWidget(QtWidgets.QWidget):
             }
             QProgressBar::chunk {
                 background-color: #facc15;
-                border-radius: 3px;
+                border-radius: 2px;
             }
         """)
         layout.addWidget(self.progress_bar)
 
-        # Status text (detailed)
+        # Status text (e.g. "Done!", "Talking to Gemini...")
         self.status_label = QtWidgets.QLabel("")
+        self.status_label.setAlignment(
+            QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         self.status_label.setStyleSheet(
             "color: #aaa; font-size: 10px; background: transparent;"
         )
