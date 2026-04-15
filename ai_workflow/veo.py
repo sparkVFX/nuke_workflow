@@ -980,7 +980,7 @@ def _get_internal_read(player_group):
         return None
 
 
-def _rebuild_veo_group_for_thumbnail(node, media_path=None):
+def _rebuild_veo_group_for_thumbnail(node, media_path=None, duration=None):
     """'Replacement Jutsu' — rebuild the VEO Viewer Group node to force thumbnail refresh.
 
     Nuke's Group-node postage-stamp cache is bound to the C++ node instance
@@ -997,6 +997,9 @@ def _rebuild_veo_group_for_thumbnail(node, media_path=None):
 
     If *media_path* is given the InternalRead is pointed to that file
     **before** the copy so the pasted clone already has the right media.
+
+    If *duration* is given (seconds, str or number) it's used as fallback to
+    compute frame range (duration × fps) when origfirst/origlast = 1/1.
 
     Returns the **new** Group node (the old reference is now invalid).
     Returns *None* on failure (caller should fall back to legacy approach).
@@ -1028,6 +1031,7 @@ def _rebuild_veo_group_for_thumbnail(node, media_path=None):
                     except Exception:
                         pass
                 # Sync first/last to origfirst/origlast so the Read plays full range
+                _range_set = False
                 try:
                     _of = int(ir["origfirst"].value()) if "origfirst" in ir.knobs() else None
                     _ol = int(ir["origlast"].value()) if "origlast" in ir.knobs() else None
@@ -1036,9 +1040,68 @@ def _rebuild_veo_group_for_thumbnail(node, media_path=None):
                             ir["first"].setValue(_of)
                         if "last" in ir.knobs():
                             ir["last"].setValue(_ol)
+                        _range_set = True
                         print("{}   InternalRead frame range: {}-{}".format(_tag, _of, _ol))
                 except Exception:
                     pass
+                # Fallback: calculate frame range from duration × fps
+                if not _range_set and duration:
+                    try:
+                        _fps = nuke.root()["fps"].value()
+                        if not _fps or _fps <= 0:
+                            _fps = 24.0
+                        _dur_str = str(duration).replace("s", "").strip()
+                        _dur_val = float(_dur_str)
+                        _last_frame = int(round(_dur_val * _fps))
+                        if _last_frame > 1:
+                            if "first" in ir.knobs():
+                                ir["first"].setValue(1)
+                            if "last" in ir.knobs():
+                                ir["last"].setValue(_last_frame)
+                            if "origfirst" in ir.knobs():
+                                ir["origfirst"].setValue(1)
+                            if "origlast" in ir.knobs():
+                                ir["origlast"].setValue(_last_frame)
+                            _range_set = True
+                            print("{}   InternalRead frame range set to 1-{} (from duration={}s x fps={})".format(
+                                _tag, _last_frame, _dur_val, _fps))
+                    except Exception:
+                        pass
+                # Fallback: try veo_duration knob on the Group
+                if not _range_set:
+                    try:
+                        if "veo_duration" in node.knobs():
+                            _node_dur = node["veo_duration"].value()
+                            if _node_dur:
+                                _fps = nuke.root()["fps"].value()
+                                if not _fps or _fps <= 0:
+                                    _fps = 24.0
+                                _dur_str = str(_node_dur).replace("s", "").strip()
+                                _dur_val = float(_dur_str)
+                                _last_frame = int(round(_dur_val * _fps))
+                                if _last_frame > 1:
+                                    if "first" in ir.knobs():
+                                        ir["first"].setValue(1)
+                                    if "last" in ir.knobs():
+                                        ir["last"].setValue(_last_frame)
+                                    if "origfirst" in ir.knobs():
+                                        ir["origfirst"].setValue(1)
+                                    if "origlast" in ir.knobs():
+                                        ir["origlast"].setValue(_last_frame)
+                                    _range_set = True
+                                    print("{}   InternalRead frame range set to 1-{} (from veo_duration={})".format(
+                                        _tag, _last_frame, _node_dur))
+                    except Exception:
+                        pass
+                # Sync Group-level frame range knobs to match
+                if _range_set:
+                    for _rk, _gk in [("first", "veo_first"), ("last", "veo_last"),
+                                      ("origfirst", "veo_origfirst"), ("origlast", "veo_origlast")]:
+                        try:
+                            if _rk in ir.knobs() and _gk in node.knobs():
+                                node[_gk].setValue(int(ir[_rk].value()))
+                        except Exception:
+                            pass
                 node.end()
                 # Also sync Group-level veo_file knob
                 if "veo_file" in node.knobs():
@@ -1161,8 +1224,75 @@ def _rebuild_veo_group_for_thumbnail(node, media_path=None):
                             new_ir["origfirst"].setValue(_gf)
                         if "origlast" in new_ir.knobs():
                             new_ir["origlast"].setValue(_gl)
+                        _range_ok = True
                         print("{}   pushed Group range {}-{} -> Read (fallback)".format(
                             _tag, _gf, _gl))
+                # Fallback: duration × fps calculation (when both Read and Group are 1/1)
+                if not _range_ok and duration:
+                    try:
+                        _fps = nuke.root()["fps"].value()
+                        if not _fps or _fps <= 0:
+                            _fps = 24.0
+                        _dur_str = str(duration).replace("s", "").strip()
+                        _dur_val = float(_dur_str)
+                        _last_frame = int(round(_dur_val * _fps))
+                        if _last_frame > 1:
+                            if "first" in new_ir.knobs():
+                                new_ir["first"].setValue(1)
+                            if "last" in new_ir.knobs():
+                                new_ir["last"].setValue(_last_frame)
+                            if "origfirst" in new_ir.knobs():
+                                new_ir["origfirst"].setValue(1)
+                            if "origlast" in new_ir.knobs():
+                                new_ir["origlast"].setValue(_last_frame)
+                            # Also sync to Group knobs
+                            if "veo_first" in new_node.knobs():
+                                new_node["veo_first"].setValue(1)
+                            if "veo_last" in new_node.knobs():
+                                new_node["veo_last"].setValue(_last_frame)
+                            if "veo_origfirst" in new_node.knobs():
+                                new_node["veo_origfirst"].setValue(1)
+                            if "veo_origlast" in new_node.knobs():
+                                new_node["veo_origlast"].setValue(_last_frame)
+                            _range_ok = True
+                            print("{}   Read frame range set to 1-{} (from duration={}s x fps={})".format(
+                                _tag, _last_frame, _dur_val, _fps))
+                    except Exception:
+                        pass
+                # Fallback: try veo_duration knob
+                if not _range_ok:
+                    try:
+                        if "veo_duration" in new_node.knobs():
+                            _node_dur = new_node["veo_duration"].value()
+                            if _node_dur:
+                                _fps = nuke.root()["fps"].value()
+                                if not _fps or _fps <= 0:
+                                    _fps = 24.0
+                                _dur_str = str(_node_dur).replace("s", "").strip()
+                                _dur_val = float(_dur_str)
+                                _last_frame = int(round(_dur_val * _fps))
+                                if _last_frame > 1:
+                                    if "first" in new_ir.knobs():
+                                        new_ir["first"].setValue(1)
+                                    if "last" in new_ir.knobs():
+                                        new_ir["last"].setValue(_last_frame)
+                                    if "origfirst" in new_ir.knobs():
+                                        new_ir["origfirst"].setValue(1)
+                                    if "origlast" in new_ir.knobs():
+                                        new_ir["origlast"].setValue(_last_frame)
+                                    if "veo_first" in new_node.knobs():
+                                        new_node["veo_first"].setValue(1)
+                                    if "veo_last" in new_node.knobs():
+                                        new_node["veo_last"].setValue(_last_frame)
+                                    if "veo_origfirst" in new_node.knobs():
+                                        new_node["veo_origfirst"].setValue(1)
+                                    if "veo_origlast" in new_node.knobs():
+                                        new_node["veo_origlast"].setValue(_last_frame)
+                                    _range_ok = True
+                                    print("{}   Read frame range set to 1-{} (from veo_duration={})".format(
+                                        _tag, _last_frame, _node_dur))
+                    except Exception:
+                        pass
                 new_node.end()
         except Exception as _vre:
             print("{}   frame range verify error: {}".format(_tag, _vre))
@@ -2187,9 +2317,15 @@ def create_veo_viewer_standalone(xpos=None, ypos=None):
         nuke.Undo.end()
 
 
-def update_veo_viewer_read(viewer_node, new_video_path):
+def update_veo_viewer_read(viewer_node, new_video_path, duration=None):
     """Update the internal Read node of a VEO Viewer with a new video path.
-    If the viewer node doesn't exist or is invalid, create a new VEO Viewer."""
+    If the viewer node doesn't exist or is invalid, create a new VEO Viewer.
+
+    Args:
+        duration: Video duration in seconds (str or number). Used as fallback
+                  to compute frame range (duration × fps) when the Read node's
+                  origfirst/origlast can't be parsed from the MOV header.
+    """
     if viewer_node is not None:
         internal_read = _get_internal_read(viewer_node)
         if internal_read:
@@ -2209,6 +2345,7 @@ def update_veo_viewer_read(viewer_node, new_video_path):
             # but first/last (the user-editable frame range) may NOT auto-sync.
             # We must explicitly set first/last = origfirst/origlast so the Read
             # node actually plays the full frame range of the video.
+            _range_set = False
             try:
                 _of = int(internal_read["origfirst"].value()) if "origfirst" in internal_read.knobs() else None
                 _ol = int(internal_read["origlast"].value()) if "origlast" in internal_read.knobs() else None
@@ -2217,11 +2354,62 @@ def update_veo_viewer_read(viewer_node, new_video_path):
                         internal_read["first"].setValue(_of)
                     if "last" in internal_read.knobs():
                         internal_read["last"].setValue(_ol)
+                    _range_set = True
                     print("[VEO] update_veo_viewer_read: Read frame range set to {}-{}".format(_of, _ol))
                 else:
-                    print("[VEO] update_veo_viewer_read: origfirst/origlast = {}/{} — skipping first/last sync".format(_of, _ol))
+                    print("[VEO] update_veo_viewer_read: origfirst/origlast = {}/{} — not usable".format(_of, _ol))
             except Exception as _fe:
                 print("[VEO] update_veo_viewer_read: frame range sync error: {}".format(_fe))
+            # Fallback: calculate frame range from duration × fps if Read didn't parse it
+            # (same logic as create_veo_viewer_node)
+            if not _range_set and duration:
+                try:
+                    _fps = nuke.root()["fps"].value()
+                    if not _fps or _fps <= 0:
+                        _fps = 24.0
+                    _dur_str = str(duration).replace("s", "").strip()
+                    _dur_val = float(_dur_str)
+                    _last_frame = int(round(_dur_val * _fps))
+                    if _last_frame > 1:
+                        if "first" in internal_read.knobs():
+                            internal_read["first"].setValue(1)
+                        if "last" in internal_read.knobs():
+                            internal_read["last"].setValue(_last_frame)
+                        if "origfirst" in internal_read.knobs():
+                            internal_read["origfirst"].setValue(1)
+                        if "origlast" in internal_read.knobs():
+                            internal_read["origlast"].setValue(_last_frame)
+                        _range_set = True
+                        print("[VEO] update_veo_viewer_read: Read frame range set to 1-{} (from duration={}s x fps={})".format(
+                            _last_frame, _dur_val, _fps))
+                except Exception as _de:
+                    print("[VEO] update_veo_viewer_read: duration fallback error: {}".format(_de))
+            # If still not set, try to get duration from the node's veo_duration knob
+            if not _range_set:
+                try:
+                    if "veo_duration" in viewer_node.knobs():
+                        _node_dur = viewer_node["veo_duration"].value()
+                        if _node_dur:
+                            _fps = nuke.root()["fps"].value()
+                            if not _fps or _fps <= 0:
+                                _fps = 24.0
+                            _dur_str = str(_node_dur).replace("s", "").strip()
+                            _dur_val = float(_dur_str)
+                            _last_frame = int(round(_dur_val * _fps))
+                            if _last_frame > 1:
+                                if "first" in internal_read.knobs():
+                                    internal_read["first"].setValue(1)
+                                if "last" in internal_read.knobs():
+                                    internal_read["last"].setValue(_last_frame)
+                                if "origfirst" in internal_read.knobs():
+                                    internal_read["origfirst"].setValue(1)
+                                if "origlast" in internal_read.knobs():
+                                    internal_read["origlast"].setValue(_last_frame)
+                                _range_set = True
+                                print("[VEO] update_veo_viewer_read: Read frame range set to 1-{} (from veo_duration={})".format(
+                                    _last_frame, _node_dur))
+                except Exception as _nde:
+                    print("[VEO] update_veo_viewer_read: veo_duration fallback error: {}".format(_nde))
             viewer_node.end()
             if "veo_file" in viewer_node.knobs():
                 viewer_node["veo_file"].setValue(new_video_path.replace("\\", "/"))
@@ -3875,12 +4063,17 @@ class VeoRecordWidget(QtWidgets.QWidget):
             if path and os.path.exists(path):
                 def _update():
                     try:
+                        # Extract duration from metadata for frame range fallback
+                        _regen_duration = metadata.get("duration") if metadata else None
                         cur_node = node_ref
-                        updated = update_veo_viewer_read(cur_node, path)
+                        # Update veo_duration knob so fallback calculations use the new value
+                        if _regen_duration and "veo_duration" in cur_node.knobs():
+                            cur_node["veo_duration"].setValue(str(_regen_duration))
+                        updated = update_veo_viewer_read(cur_node, path, duration=_regen_duration)
                         if updated:
                             cur_node = updated
                             # --- Replacement Jutsu: rebuild Group for fresh thumbnail ---
-                            rebuilt = _rebuild_veo_group_for_thumbnail(cur_node, path)
+                            rebuilt = _rebuild_veo_group_for_thumbnail(cur_node, path, duration=_regen_duration)
                             if rebuilt:
                                 cur_node = rebuilt
                                 # Update widget reference so future operations target the new node
