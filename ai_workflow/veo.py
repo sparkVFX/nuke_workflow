@@ -968,7 +968,7 @@ def create_veo_player_node(video_path=None, name=None, xpos=None, ypos=None):
 
 
 def _get_internal_read(player_group):
-    """Get the internal Read node from a VEO Player Group."""
+    """Get the internal Read node from a VEO Player/Viewer Group."""
     if player_group is None:
         return None
     try:
@@ -978,6 +978,60 @@ def _get_internal_read(player_group):
         return read_node
     except Exception:
         return None
+
+
+def _update_veo_thumbnail(node, media_path=None):
+    """Enable Nuke postage-stamp thumbnail on a VEO Viewer Group node.
+
+    Mirrors NanoBanana's ``_update_node_thumbnail`` but adapted for
+    video (VEO) content.  The key steps are:
+      1. Ensure InternalRead has the correct file loaded.
+      2. Enable the ``postage_stamp`` knob.
+      3. Force pixel computation so there's data to render.
+      4. Trigger DAG refresh so the thumbnail appears immediately.
+    """
+    if not node or node.Class() != "Group":
+        print("[VEO] Thumbnail: skip — invalid node")
+        return
+
+    # 1. Ensure InternalRead points to the media file
+    if media_path and os.path.isfile(media_path):
+        try:
+            ir = _get_internal_read(node)
+            if ir:
+                node.begin()
+                ir["file"].fromUserText(media_path)
+                node.end()
+                print("[VEO] Thumbnail: InternalRead loaded {}".format(media_path))
+            else:
+                print("[VEO] Thumbnail: WARNING no InternalRead found")
+        except Exception as e:
+            print("[VEO] Thumbnail: load error: {}".format(e))
+
+    # 2. Enable postage_stamp
+    if "postage_stamp" in node.knobs():
+        try:
+            node["postage_stamp"].setValue(True)
+            print("[VEO] Thumbnail: postage_stamp enabled on '{}'".format(
+                node.name()))
+        except Exception as e:
+            print("[VEO] Thumbnail: postage_stamp error: {}".format(e))
+    else:
+        print("[VEO] Thumbnail: WARNING no postage_stamp knob")
+
+    # 3. Force pixel computation
+    try:
+        node.sample("red", 0, 0)
+    except Exception:
+        pass
+
+    # 4. Force DAG refresh — toggle postage_stamp off/on + modified()
+    try:
+        node["postage_stamp"].setValue(False)
+        node["postage_stamp"].setValue(True)
+        nuke.modified()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -1460,6 +1514,13 @@ def create_veo_viewer_node(generator_node, prompt, aspect_ratio, duration,
         marker.setValue(True)
         marker.setFlag(nuke.INVISIBLE)
         group.addKnob(marker)
+
+        # --- Enable postage-stamp thumbnail (like NanoBanana) ---
+        try:
+            read_node["colorspace"].setValue("default")
+        except Exception:
+            pass
+        _update_veo_thumbnail(group, output_video_path)
 
         print("VEO: Created VEO Viewer '{}' with internal Read for: {}".format(
             group.name(), output_video_path))
