@@ -437,6 +437,7 @@ class ChatBubble(QtWidgets.QFrame):
             # Message text label
             self.msg_label = QtWidgets.QLabel("")
             self.msg_label.setWordWrap(True)
+            self.msg_label.setFocusPolicy(QtCore.Qt.NoFocus)
             self.msg_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
             self.msg_label.setStyleSheet(
                 "color: #eeeeee; font-size: 12px; background: transparent;"
@@ -531,7 +532,12 @@ class ChatBubble(QtWidgets.QFrame):
             # Message text
             self.msg_label = QtWidgets.QLabel(text)
             self.msg_label.setWordWrap(True)
-            self.msg_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            # Prevent focus so no caret/cursor can appear
+            self.msg_label.setFocusPolicy(QtCore.Qt.NoFocus)
+            # Do NOT enable TextSelectableByMouse — it causes an ugly
+            # text-cursor (caret) to appear when the label gains focus.
+            # Copy is handled by the dedicated copy icon button instead.
+            self.msg_label.setTextInteractionFlags(QtCore.Qt.NoTextInteraction)
             self.msg_label.setStyleSheet(
                 "color: #d0d0d0; font-size: 13px; background: transparent;"
                 "line-height: 1.5; padding: 2px 0px;"
@@ -2257,8 +2263,8 @@ class GeminiChatPanel(QtWidgets.QWidget):
         self._send_btn.setText("Sending...")
         self._status_label.setText("Waiting for Gemini response...")
 
-        # Create an empty assistant bubble for streaming
-        self._streaming_bubble = self._add_bubble("model", "▌")
+        # Create an empty assistant bubble for streaming (no blinking cursor)
+        self._streaming_bubble = self._add_bubble("model", "")
         self._streaming_text = ""
 
         # Run API call in background thread
@@ -2360,7 +2366,7 @@ class GeminiChatPanel(QtWidgets.QWidget):
             if not _isValid(self):
                 return
             if hasattr(self, "_streaming_bubble") and self._streaming_bubble and _isValid(self._streaming_bubble):
-                self._streaming_bubble.set_text(accumulated_text + " ▌")
+                self._streaming_bubble.set_text(accumulated_text)
                 self._scroll_to_bottom()
         try:
             nuke.executeInMainThreadWithResult(_update)
