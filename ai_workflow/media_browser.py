@@ -526,7 +526,7 @@ class MediaBrowserPanel(QtWidgets.QWidget):
         self.count_label.setText("{} of {} shown".format(visible_count, len(self._cards)))
 
     def _on_card_clicked(self, node_name):
-        """Select and show clicked node in the DAG."""
+        """Select, zoom to, and connect clicked node to Viewer1."""
         node = nuke.toNode(node_name)
         if node:
             # Select only this node, deselect others
@@ -535,11 +535,17 @@ class MediaBrowserPanel(QtWidgets.QWidget):
             node.setSelected(True)
             # Zoom to node in DAG view
             try:
-                # Try to focus the Node Graph and zoom to the node
                 nuke.zoomToFitSelected()
             except Exception:
                 pass
-            print("[Media Browser] Selected node '{}'".format(node_name))
+            # Connect node to Viewer1 (like pressing "1" in Nuke)
+            try:
+                viewer = nuke.toNode("Viewer1")
+                if viewer:
+                    viewer.setInput(0, node)
+            except Exception:
+                pass
+            print("[Media Browser] Selected and viewed node '{}'".format(node_name))
         else:
             print("[Media Browser] WARNING: Node '{}' no longer exists".format(node_name))
 

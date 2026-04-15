@@ -1905,7 +1905,7 @@ class GeminiChatPanel(QtWidgets.QWidget):
         """Install a global ESC QShortcut on the panel so users can cancel
         an in-flight Gemini request at any time."""
         from ai_workflow.status_bar import task_progress_manager
-        esc = QtWidgets.QShortcut(
+        esc = QtGui.QShortcut(
             QtGui.QKeySequence(QtCore.Qt.Key_Escape), self
         )
         esc.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
