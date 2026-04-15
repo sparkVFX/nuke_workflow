@@ -1247,6 +1247,9 @@ def create_veo_viewer_node(generator_node, prompt, aspect_ratio, duration,
                 pass
 
         # --- colorspace / Input Transform (Enumeration_Knob) ---
+        # NOTE: Do NOT force colorspace to "default" — in OCIO mode that is
+        # an invalid LUT name and causes "Invalid LUT selected : default".
+        # Let Nuke keep whatever it auto-detected when loading the video.
         # In OCIO mode the label is "Input Transform"; we use the Read's own label.
         if "colorspace" in read_node.knobs():
             cs_label = read_node["colorspace"].label() or "colorspace"
@@ -1516,10 +1519,6 @@ def create_veo_viewer_node(generator_node, prompt, aspect_ratio, duration,
         group.addKnob(marker)
 
         # --- Enable postage-stamp thumbnail (like NanoBanana) ---
-        try:
-            read_node["colorspace"].setValue("default")
-        except Exception:
-            pass
         _update_veo_thumbnail(group, output_video_path)
 
         print("VEO: Created VEO Viewer '{}' with internal Read for: {}".format(
@@ -3548,14 +3547,21 @@ class VeoRecordWidget(QtWidgets.QWidget):
             if path and os.path.exists(path):
                 def _update():
                     try:
-                        read_node = update_record_read_node(node_ref, path)
-                        if read_node:
+                        updated = update_veo_viewer_read(node_ref, path)
+                        if updated:
+                            # Also refresh thumbnail
+                            _update_veo_thumbnail(updated, path)
                             try:
-                                nuke.connectViewer(0, read_node)
+                                nuke.connectViewer(0, updated)
                             except:
                                 pass
+                        else:
+                            print("VEO: WARNING update_veo_viewer_read returned None for '{}'".format(
+                                node_ref.name() if node_ref else "?"))
                     except Exception as e:
-                        print("VEO: ERROR updating Read node: {}".format(e))
+                        import traceback
+                        print("VEO: ERROR updating VEO Viewer Read: {}".format(e))
+                        traceback.print_exc()
                     finally:
                         _veo_active_workers.pop(worker_id, None)
                 nuke.executeInMainThread(_update)
