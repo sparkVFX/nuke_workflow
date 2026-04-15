@@ -11,6 +11,7 @@ import tempfile
 import time
 import threading
 import nuke
+import nukescripts
 
 try:
     from PySide6 import QtWidgets, QtCore, QtGui
@@ -564,35 +565,30 @@ def _create_media_browser_widget():
     return MediaBrowserPanel()
 
 
-def _get_nuke_main_window():
-    """Get Nuke's main window to use as parent for floating panels."""
-    for obj in QtWidgets.QApplication.topLevelWidgets():
-        if obj.metaObject().className() == 'Foundry::UI::DockMainWindow':
-            return obj
-    return None
-
-
 def show_media_browser_panel():
-    """Open the Media Browser as a floating window."""
-    try:
-        parent = _get_nuke_main_window()
-        panel = MediaBrowserPanel(parent=parent)
-    except Exception as e:
-        print("[Media Browser] ERROR creating panel: {}".format(e))
-        import traceback
-        traceback.print_exc()
-        return None
+    """Open the Media Library panel as a dockable tab inside an existing Nuke pane.
+    It will appear next to Properties / Scene Graph etc., and can be dragged around.
+    """
+    panel_id = "ai_workflow.MediaBrowserPanel"
 
-    try:
-        panel.setWindowFlags(QtCore.Qt.Window)
-        panel.resize(800, 600)
-        panel.show()
-        panel.raise_()
-        panel.activateWindow()
-    except Exception as e:
-        print("[Media Browser] ERROR showing panel: {}".format(e))
-        import traceback
-        traceback.print_exc()
-        return None
+    # create=True returns a PythonPanel we can dock
+    panel = nukescripts.panels.registerWidgetAsPanel(
+        "ai_workflow.media_browser._create_media_browser_widget",
+        "Media Library",
+        panel_id,
+        True,
+    )
 
+    if panel:
+        # Find a suitable pane to dock into
+        target_pane = None
+        for pane_name in ("Properties.1", "Viewer.1", "DAG.1"):
+            target_pane = nuke.getPaneFor(pane_name)
+            if target_pane:
+                break
+
+        if target_pane:
+            panel.addToPane(target_pane)
+        else:
+            panel.addToPane()
     return panel
