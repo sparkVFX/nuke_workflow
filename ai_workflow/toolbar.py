@@ -347,6 +347,11 @@ def register_toolbar():
         icon="VEO.png",
     )
     ai_menu.addCommand(
+        "Media Library",
+        "ai_workflow.media_browser.show_media_browser_panel()",
+        icon="Banana.png",
+    )
+    ai_menu.addCommand(
         "Generate Video VEO",
         "ai_workflow.toolbar.create_node_generate_video_veo()",
         icon="VEO.png",

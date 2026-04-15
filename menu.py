@@ -16,6 +16,17 @@ try:
 except Exception as _e:
     print("[AI Workflow] Could not register Gemini panel: {}".format(_e))
 
+# Register Media Browser as a dockable Nuke panel
+try:
+    import ai_workflow.media_browser
+    nukescripts.panels.registerWidgetAsPanel(
+        "ai_workflow.media_browser._create_media_browser_widget",
+        "Media Library",
+        "ai_workflow.MediaBrowserPanel",
+    )
+except Exception as _e:
+    print("[AI Workflow] Could not register Media Browser panel: {}".format(_e))
+
 # Install the global status bar progress widget (shows generation progress at the bottom
 # of Nuke's main window, independent of node selection).
 # We defer the install slightly so the main window is fully initialized.
