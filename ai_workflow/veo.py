@@ -1021,6 +1021,24 @@ def _rebuild_veo_group_for_thumbnail(node, media_path=None):
             if ir:
                 node.begin()
                 ir["file"].fromUserText(media_path)
+                # Force reload so the Read parses the new video file header
+                if "reload" in ir.knobs():
+                    try:
+                        ir["reload"].execute()
+                    except Exception:
+                        pass
+                # Sync first/last to origfirst/origlast so the Read plays full range
+                try:
+                    _of = int(ir["origfirst"].value()) if "origfirst" in ir.knobs() else None
+                    _ol = int(ir["origlast"].value()) if "origlast" in ir.knobs() else None
+                    if _of is not None and _ol is not None and _ol > _of:
+                        if "first" in ir.knobs():
+                            ir["first"].setValue(_of)
+                        if "last" in ir.knobs():
+                            ir["last"].setValue(_ol)
+                        print("{}   InternalRead frame range: {}-{}".format(_tag, _of, _ol))
+                except Exception:
+                    pass
                 node.end()
                 # Also sync Group-level veo_file knob
                 if "veo_file" in node.knobs():
@@ -1103,6 +1121,51 @@ def _rebuild_veo_group_for_thumbnail(node, media_path=None):
         # --- 7. Ensure postage_stamp is ON ---
         if "postage_stamp" in new_node.knobs():
             new_node["postage_stamp"].setValue(True)
+
+        # --- 8. Verify internal Read frame range after paste ---
+        # nodeCopy/nodePaste serialises knob values, so the range set in
+        # step 0 should survive.  But as a safety net, re-check and fix.
+        try:
+            new_ir = _get_internal_read(new_node)
+            if new_ir:
+                new_node.begin()
+                _of = int(new_ir["origfirst"].value()) if "origfirst" in new_ir.knobs() else None
+                _ol = int(new_ir["origlast"].value()) if "origlast" in new_ir.knobs() else None
+                _range_ok = False
+                if _of is not None and _ol is not None and _ol > _of:
+                    _cf = int(new_ir["first"].value()) if "first" in new_ir.knobs() else None
+                    _cl = int(new_ir["last"].value()) if "last" in new_ir.knobs() else None
+                    if _cf != _of or _cl != _ol:
+                        if "first" in new_ir.knobs():
+                            new_ir["first"].setValue(_of)
+                        if "last" in new_ir.knobs():
+                            new_ir["last"].setValue(_ol)
+                        print("{}   fixed Read frame range: {}-{} (was {}-{})".format(
+                            _tag, _of, _ol, _cf, _cl))
+                    # Also sync to Group-level knobs
+                    for _rk, _gk in [("first", "veo_first"), ("last", "veo_last"),
+                                      ("origfirst", "veo_origfirst"), ("origlast", "veo_origlast")]:
+                        if _rk in new_ir.knobs() and _gk in new_node.knobs():
+                            new_node[_gk].setValue(int(new_ir[_rk].value()))
+                    _range_ok = True
+                # Fallback: Read origfirst/origlast still 1/1, use Group knobs
+                if not _range_ok:
+                    _gf = int(new_node["veo_first"].value()) if "veo_first" in new_node.knobs() else 1
+                    _gl = int(new_node["veo_last"].value()) if "veo_last" in new_node.knobs() else 1
+                    if _gl > _gf:
+                        if "first" in new_ir.knobs():
+                            new_ir["first"].setValue(_gf)
+                        if "last" in new_ir.knobs():
+                            new_ir["last"].setValue(_gl)
+                        if "origfirst" in new_ir.knobs():
+                            new_ir["origfirst"].setValue(_gf)
+                        if "origlast" in new_ir.knobs():
+                            new_ir["origlast"].setValue(_gl)
+                        print("{}   pushed Group range {}-{} -> Read (fallback)".format(
+                            _tag, _gf, _gl))
+                new_node.end()
+        except Exception as _vre:
+            print("{}   frame range verify error: {}".format(_tag, _vre))
 
         # Deselect
         new_node.setSelected(False)
@@ -1274,6 +1337,51 @@ def create_veo_viewer_node(generator_node, prompt, aspect_ratio, duration,
         if output_video_path and os.path.exists(output_video_path):
             group.begin()
             read_node["file"].fromUserText(output_video_path)
+            # Force Read to re-parse the video so metadata (frame range etc.) is available
+            if "reload" in read_node.knobs():
+                try:
+                    read_node["reload"].execute()
+                except Exception:
+                    pass
+            # Explicitly set first/last = origfirst/origlast so video plays full range
+            _range_set = False
+            try:
+                _of = int(read_node["origfirst"].value()) if "origfirst" in read_node.knobs() else None
+                _ol = int(read_node["origlast"].value()) if "origlast" in read_node.knobs() else None
+                if _of is not None and _ol is not None and _ol > _of:
+                    if "first" in read_node.knobs():
+                        read_node["first"].setValue(_of)
+                    if "last" in read_node.knobs():
+                        read_node["last"].setValue(_ol)
+                    _range_set = True
+                    print("[VEO] create_veo_viewer_node: Read frame range set to {}-{} (from origfirst/origlast)".format(_of, _ol))
+                else:
+                    print("[VEO] create_veo_viewer_node: origfirst/origlast = {}/{} — not usable".format(_of, _ol))
+            except Exception as _fe:
+                print("[VEO] create_veo_viewer_node: frame range error: {}".format(_fe))
+            # Fallback: calculate frame range from duration × fps if Read didn't parse it
+            if not _range_set and duration:
+                try:
+                    _fps = nuke.root()["fps"].value()
+                    if not _fps or _fps <= 0:
+                        _fps = 24.0
+                    _dur_str = str(duration).replace("s", "").strip()
+                    _dur_val = float(_dur_str)
+                    _last_frame = int(round(_dur_val * _fps))
+                    if _last_frame > 1:
+                        if "first" in read_node.knobs():
+                            read_node["first"].setValue(1)
+                        if "last" in read_node.knobs():
+                            read_node["last"].setValue(_last_frame)
+                        if "origfirst" in read_node.knobs():
+                            read_node["origfirst"].setValue(1)
+                        if "origlast" in read_node.knobs():
+                            read_node["origlast"].setValue(_last_frame)
+                        _range_set = True
+                        print("[VEO] create_veo_viewer_node: Read frame range set to 1-{} (from duration={}s × fps={})".format(
+                            _last_frame, _dur_val, _fps))
+                except Exception as _de:
+                    print("[VEO] create_veo_viewer_node: duration fallback error: {}".format(_de))
             group.end()
 
         # Connect to the Dot
@@ -1667,6 +1775,29 @@ def create_veo_viewer_node(generator_node, prompt, aspect_ratio, duration,
 
         # --- Enable postage-stamp thumbnail (like NanoBanana) ---
         _update_veo_thumbnail(group, output_video_path)
+
+        # --- Final sync: push Group-level frame range INTO internal Read ---
+        # At creation time, knobChanged doesn't fire for initial values,
+        # so the internal Read may still have first/last=1 even though the
+        # Group-level veo_first/veo_last are correct.  Push them explicitly.
+        try:
+            group.begin()
+            for _gk, _rk in [("veo_first", "first"), ("veo_last", "last"),
+                              ("veo_origfirst", "origfirst"), ("veo_origlast", "origlast")]:
+                if _gk in group.knobs() and _rk in read_node.knobs():
+                    _gv = int(group[_gk].value())
+                    _rv = int(read_node[_rk].value())
+                    if _gv != _rv:
+                        read_node[_rk].setValue(_gv)
+                        print("[VEO] create_veo_viewer_node: synced {} -> InternalRead.{} = {}".format(
+                            _gk, _rk, _gv))
+            group.end()
+        except Exception as _sync_e:
+            print("[VEO] create_veo_viewer_node: final sync error: {}".format(_sync_e))
+            try:
+                group.end()
+            except Exception:
+                pass
 
         print("VEO: Created VEO Viewer '{}' with internal Read for: {}".format(
             group.name(), output_video_path))
@@ -2062,7 +2193,36 @@ def update_veo_viewer_read(viewer_node, new_video_path):
     if viewer_node is not None:
         internal_read = _get_internal_read(viewer_node)
         if internal_read:
+            viewer_node.begin()
             internal_read["file"].fromUserText(new_video_path)
+            # Force Read to re-parse video metadata (format, frame range, etc.)
+            # Without this, first/last/origfirst/origlast may stay at default=1
+            # because Nuke hasn't finished parsing the new MOV file yet.
+            if "reload" in internal_read.knobs():
+                try:
+                    internal_read["reload"].execute()
+                    print("[VEO] update_veo_viewer_read: reload executed for '{}'".format(
+                        new_video_path))
+                except Exception as _re:
+                    print("[VEO] update_veo_viewer_read: reload failed: {}".format(_re))
+            # After reload, Nuke updates origfirst/origlast from the file header,
+            # but first/last (the user-editable frame range) may NOT auto-sync.
+            # We must explicitly set first/last = origfirst/origlast so the Read
+            # node actually plays the full frame range of the video.
+            try:
+                _of = int(internal_read["origfirst"].value()) if "origfirst" in internal_read.knobs() else None
+                _ol = int(internal_read["origlast"].value()) if "origlast" in internal_read.knobs() else None
+                if _of is not None and _ol is not None and _ol > _of:
+                    if "first" in internal_read.knobs():
+                        internal_read["first"].setValue(_of)
+                    if "last" in internal_read.knobs():
+                        internal_read["last"].setValue(_ol)
+                    print("[VEO] update_veo_viewer_read: Read frame range set to {}-{}".format(_of, _ol))
+                else:
+                    print("[VEO] update_veo_viewer_read: origfirst/origlast = {}/{} — skipping first/last sync".format(_of, _ol))
+            except Exception as _fe:
+                print("[VEO] update_veo_viewer_read: frame range sync error: {}".format(_fe))
+            viewer_node.end()
             if "veo_file" in viewer_node.knobs():
                 viewer_node["veo_file"].setValue(new_video_path.replace("\\", "/"))
             # Sync format from Read to Group
@@ -2089,6 +2249,27 @@ def update_veo_viewer_read(viewer_node, new_video_path):
                         viewer_node[_gk].setValue(int(internal_read[_rk].value()))
                 except Exception:
                     pass
+            # Fallback: if Read first/last are still 1/1 but Group has correct values,
+            # push Group -> Read (the Group may already have correct range from creation)
+            try:
+                _rf = int(internal_read["first"].value()) if "first" in internal_read.knobs() else 1
+                _rl = int(internal_read["last"].value()) if "last" in internal_read.knobs() else 1
+                if _rl <= _rf:
+                    # Read range is bad — try to get correct values from Group knobs
+                    _gf = int(viewer_node["veo_first"].value()) if "veo_first" in viewer_node.knobs() else 1
+                    _gl = int(viewer_node["veo_last"].value()) if "veo_last" in viewer_node.knobs() else 1
+                    if _gl > _gf:
+                        viewer_node.begin()
+                        internal_read["first"].setValue(_gf)
+                        internal_read["last"].setValue(_gl)
+                        if "origfirst" in internal_read.knobs():
+                            internal_read["origfirst"].setValue(_gf)
+                        if "origlast" in internal_read.knobs():
+                            internal_read["origlast"].setValue(_gl)
+                        viewer_node.end()
+                        print("[VEO] update_veo_viewer_read: pushed Group range {}-{} -> Read".format(_gf, _gl))
+            except Exception as _fb_e:
+                print("[VEO] update_veo_viewer_read: fallback push error: {}".format(_fb_e))
             # Sync colorspace from Read to Group
             try:
                 if "colorspace" in internal_read.knobs() and "veo_colorspace" in viewer_node.knobs():
