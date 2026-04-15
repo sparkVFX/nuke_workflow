@@ -980,6 +980,150 @@ def _get_internal_read(player_group):
         return None
 
 
+def _rebuild_veo_group_for_thumbnail(node, media_path=None):
+    """'Replacement Jutsu' — rebuild the VEO Viewer Group node to force thumbnail refresh.
+
+    Nuke's Group-node postage-stamp cache is bound to the C++ node instance
+    and cannot be flushed via any public Python / Tcl API.  The only reliable
+    way to make the DAG show a new thumbnail is to **replace the node with
+    an identical copy** (same strategy proven in NanoBanana).
+
+    Strategy:
+      1. Save all upstream / downstream connections
+      2. nuke.nodeCopy  -> clipboard  (serialises the Group + its internals)
+      3. Delete old node
+      4. nuke.nodePaste -> new node   (fresh C++ instance -> fresh thumbnail)
+      5. Restore all connections & ensure the new node keeps the same name
+
+    If *media_path* is given the InternalRead is pointed to that file
+    **before** the copy so the pasted clone already has the right media.
+
+    Returns the **new** Group node (the old reference is now invalid).
+    Returns *None* on failure (caller should fall back to legacy approach).
+    """
+    if not node or node.Class() != "Group":
+        return None
+    if "is_veo_viewer" not in node.knobs():
+        return None  # safety — only operate on VEO Viewer nodes
+
+    _tag = "[VEO Rebuild]"
+
+    try:
+        node_name = node.name()
+        print("{} START for '{}'".format(_tag, node_name))
+
+        # Wrap in Undo group so the whole operation can be reverted if needed
+        nuke.Undo.begin("VEO Rebuild Thumbnail")
+
+        # --- 0. Set media_path on InternalRead BEFORE copy ---
+        if media_path and os.path.isfile(media_path):
+            ir = _get_internal_read(node)
+            if ir:
+                node.begin()
+                ir["file"].fromUserText(media_path)
+                node.end()
+                # Also sync Group-level veo_file knob
+                if "veo_file" in node.knobs():
+                    node["veo_file"].setValue(media_path.replace("\\", "/"))
+                if "veo_output_path" in node.knobs():
+                    node["veo_output_path"].setValue(media_path.replace("\\", "/"))
+
+        # --- 1. Save connections ---
+        # Upstream (inputs to this node)
+        upstream = {}  # {input_index: upstream_node}
+        for i in range(node.inputs()):
+            inp = node.input(i)
+            if inp:
+                upstream[i] = inp
+
+        # Downstream (nodes that take this node as input)
+        downstream = []  # [(dependent_node, input_index)]
+        for dep in node.dependent(nuke.INPUTS | nuke.HIDDEN_INPUTS):
+            for i in range(dep.inputs()):
+                if dep.input(i) == node:
+                    downstream.append((dep, i))
+
+        # Save position
+        xpos = int(node["xpos"].value())
+        ypos = int(node["ypos"].value())
+
+        # --- 2. Select only this node and copy to clipboard ---
+        for n in nuke.allNodes():
+            n.setSelected(False)
+        node.setSelected(True)
+
+        nuke.nodeCopy("%clipboard%")
+        print("{}   nodeCopy OK".format(_tag))
+
+        # --- 3. Delete old node ---
+        nuke.delete(node)
+        print("{}   deleted old '{}'".format(_tag, node_name))
+
+        # --- 4. Paste from clipboard ---
+        for n in nuke.allNodes():
+            n.setSelected(False)
+
+        nuke.nodePaste("%clipboard%")
+        print("{}   nodePaste OK".format(_tag))
+
+        # The pasted node(s) are selected — find our new Group
+        new_node = None
+        for n in nuke.selectedNodes():
+            if n.Class() == "Group" and "is_veo_viewer" in n.knobs():
+                new_node = n
+                break
+
+        if not new_node:
+            print("{} ERROR: Could not find pasted node!".format(_tag))
+            return None
+
+        # --- 5. Restore name ---
+        if new_node.name() != node_name:
+            new_node["name"].setValue(node_name)
+            print("{}   renamed to '{}'".format(_tag, node_name))
+
+        # Restore position (nodePaste offsets by +10,+10)
+        new_node["xpos"].setValue(xpos)
+        new_node["ypos"].setValue(ypos)
+
+        # --- 6. Restore connections ---
+        for idx, up_node in upstream.items():
+            try:
+                new_node.setInput(idx, up_node)
+            except Exception as e:
+                print("{}   upstream input {} err: {}".format(_tag, idx, e))
+
+        for dep_node, dep_idx in downstream:
+            try:
+                dep_node.setInput(dep_idx, new_node)
+            except Exception as e:
+                print("{}   downstream '{}' input {} err: {}".format(
+                    _tag, dep_node.name(), dep_idx, e))
+
+        # --- 7. Ensure postage_stamp is ON ---
+        if "postage_stamp" in new_node.knobs():
+            new_node["postage_stamp"].setValue(True)
+
+        # Deselect
+        new_node.setSelected(False)
+
+        print("{} DONE — new node '{}' created".format(_tag, new_node.name()))
+        nuke.Undo.end()
+        return new_node
+
+    except Exception as e:
+        import traceback
+        print("{} FATAL ERROR: {}\n{}".format(_tag, e, traceback.format_exc()))
+        try:
+            nuke.Undo.cancel()
+        except Exception:
+            try:
+                nuke.Undo.end()
+            except Exception:
+                pass
+        return None
+
+
 def _update_veo_thumbnail(node, media_path=None):
     """Enable Nuke postage-stamp thumbnail on a VEO Viewer Group node.
 
@@ -989,6 +1133,9 @@ def _update_veo_thumbnail(node, media_path=None):
       2. Enable the ``postage_stamp`` knob.
       3. Force pixel computation so there's data to render.
       4. Trigger DAG refresh so the thumbnail appears immediately.
+
+    NOTE: This is the *fallback* method.  For reliable thumbnail refresh,
+    use ``_rebuild_veo_group_for_thumbnail`` (Replacement Jutsu) first.
     """
     if not node or node.Class() != "Group":
         print("[VEO] Thumbnail: skip — invalid node")
@@ -3547,12 +3694,25 @@ class VeoRecordWidget(QtWidgets.QWidget):
             if path and os.path.exists(path):
                 def _update():
                     try:
-                        updated = update_veo_viewer_read(node_ref, path)
+                        cur_node = node_ref
+                        updated = update_veo_viewer_read(cur_node, path)
                         if updated:
-                            # Also refresh thumbnail
-                            _update_veo_thumbnail(updated, path)
+                            cur_node = updated
+                            # --- Replacement Jutsu: rebuild Group for fresh thumbnail ---
+                            rebuilt = _rebuild_veo_group_for_thumbnail(cur_node, path)
+                            if rebuilt:
+                                cur_node = rebuilt
+                                # Update widget reference so future operations target the new node
+                                try:
+                                    if _isValid(widget_ref):
+                                        widget_ref.node = rebuilt
+                                except Exception:
+                                    pass
+                            else:
+                                # Fallback: legacy thumbnail update
+                                _update_veo_thumbnail(cur_node, path)
                             try:
-                                nuke.connectViewer(0, updated)
+                                nuke.connectViewer(0, cur_node)
                             except:
                                 pass
                         else:
