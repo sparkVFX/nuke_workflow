@@ -337,6 +337,7 @@ class MediaBrowserPanel(QtWidgets.QWidget):
         self._cards = {}  # node_name -> MediaCard
         self._thumb_queue = []  # cards pending video thumbnail render
         self._thumb_timer = None
+        self._resize_timer = None
         self._build_ui()
         self.refresh()
 
@@ -417,7 +418,11 @@ class MediaBrowserPanel(QtWidgets.QWidget):
 
         col = 0
         row = 0
-        max_cols = max(1, self.width() // 240)  # ~240px per card including spacing
+        available_width = self.scroll_area.viewport().width()
+        card_w = 220  # MediaCard setFixedSize(220, 260)
+        spacing = self.card_layout.spacing()
+        unit = card_w + spacing  # one column unit width
+        max_cols = max(1, available_width // unit)
 
         pending_video_cards = []
         for entry in items:
@@ -427,7 +432,7 @@ class MediaBrowserPanel(QtWidgets.QWidget):
                 file_path=entry["file"],
             )
             card.clicked.connect(self._on_card_clicked)
-            self.card_layout.addWidget(card, row, col)
+            self.card_layout.addWidget(card, row, col, QtCore.Qt.AlignCenter)
             self._cards[entry["name"]] = card
             # Collect video cards that need async thumbnail
             if getattr(card, '_thumb_pending', False):
@@ -436,6 +441,15 @@ class MediaBrowserPanel(QtWidgets.QWidget):
             if col >= max_cols:
                 col = 0
                 row += 1
+
+        # Make columns stretch evenly to fill full width
+        for c in range(max_cols):
+            self.card_layout.setColumnStretch(c, 1)
+
+        # Force scroll_content geometry to sync with current viewport (shrink only)
+        vp_w = self.scroll_area.viewport().width()
+        if self.scroll_content.width() > vp_w:
+            self.scroll_content.setGeometry(0, 0, vp_w, self.scroll_content.height())
 
         video_count = sum(1 for i in items if i["type"] == "video")
         image_count = len(items) - video_count
@@ -552,7 +566,17 @@ class MediaBrowserPanel(QtWidgets.QWidget):
 
     def resizeEvent(self, event):
         super(MediaBrowserPanel, self).resizeEvent(event)
-        # Re-layout cards on resize so they reflow
+        # Debounce re-layout to avoid excessive refreshes during drag
+        if self._cards:
+            if self._resize_timer is not None:
+                self._resize_timer.stop()
+            self._resize_timer = QtCore.QTimer(self)
+            self._resize_timer.setSingleShot(True)
+            self._resize_timer.timeout.connect(self._debounced_refresh)
+            self._resize_timer.start(100)
+
+    def _debounced_refresh(self):
+        self._resize_timer = None
         if self._cards:
             self.refresh()
 
