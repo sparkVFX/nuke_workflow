@@ -138,8 +138,10 @@ else:
     # Restore NB Player thumbnails on script load
     def _restore_thumbnails():
         try:
-            from ai_workflow.nanobanana import restore_nb_thumbnails
+            from ai_workflow.nanobanana import restore_nb_thumbnails, ensure_save_callback_registered
             restore_nb_thumbnails()
+            # Register the onScriptSave callback for cache migration
+            ensure_save_callback_registered()
         except Exception as _e:
             print("[AI Workflow] Thumbnail restore error: {}".format(_e))
     nuke.addOnScriptLoad(_restore_thumbnails)

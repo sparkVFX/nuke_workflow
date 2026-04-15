@@ -62,6 +62,8 @@ MODEL_MAX_INPUTS = {
     "imagen-3.0-generate-002": 1,
 }
 CONFIG_FILE_NAME = "nanobanana_config.json"
+DEFAULT_PROJECT_CACHE_NAME = "nanobanana_projects"
+UNSAVED_PROJECT_DIR = "_unsaved_"
 
 # ---------------------------------------------------------------------------
 # Module-level registry for active workers.
@@ -349,6 +351,30 @@ class NanoBananaSettings:
         self._data["prores_codec"] = value
         self._save()
 
+    @property
+    def project_cache_root(self):
+        custom_dir = self._data.get("project_cache_root", "").strip()
+        if custom_dir:
+            if not os.path.exists(custom_dir):
+                try:
+                    os.makedirs(custom_dir)
+                except OSError:
+                    pass
+            if os.path.isdir(custom_dir):
+                return custom_dir
+        # Default: next to the old temp directory
+        old_temp = self.temp_directory
+        # Use parent of temp dir as root, or system temp
+        default_root = os.path.join(tempfile.gettempdir(), DEFAULT_PROJECT_CACHE_NAME)
+        if not os.path.exists(default_root):
+            os.makedirs(default_root)
+        return default_root
+
+    @project_cache_root.setter
+    def project_cache_root(self, value):
+        self._data["project_cache_root"] = value
+        self._save()
+
 
 # ---------------------------------------------------------------------------
 # Settings Dialog
@@ -443,6 +469,41 @@ class NanoBananaSettingsDialog(QtWidgets.QDialog):
         self.temp_dir_input.textChanged.connect(self._update_effective_path)
         
         layout.addWidget(temp_group)
+        
+        # === Project Cache Root Section ===
+        cache_group = QtWidgets.QGroupBox("Project Cache (per-script isolation)")
+        cache_layout = QtWidgets.QVBoxLayout(cache_group)
+        
+        cache_label = QtWidgets.QLabel(
+            "Root folder for per-project caches:\n"
+            "Each .nk script gets its own sub-folder for input/output/logs.")
+        cache_label.setStyleSheet("color: #aaa; font-size: 11px;")
+        cache_layout.addWidget(cache_label)
+        
+        cache_row = QtWidgets.QHBoxLayout()
+        self.cache_root_input = QtWidgets.QLineEdit()
+        self.cache_root_input.setPlaceholderText(
+            "Leave empty for default (system temp/nanobanana_projects)")
+        self.cache_root_input.setText(self.settings._data.get("project_cache_root", ""))
+        cache_row.addWidget(self.cache_root_input)
+        
+        browse_cache_btn = QtWidgets.QPushButton("Browse...")
+        browse_cache_btn.setObjectName("secondaryBtn")
+        browse_cache_btn.clicked.connect(self._browse_cache_root)
+        cache_row.addWidget(browse_cache_btn)
+        
+        cache_layout.addLayout(cache_row)
+        
+        # Show current effective project path
+        self.effective_proj_label = QtWidgets.QLabel()
+        self._update_effective_proj_path()
+        self.effective_proj_label.setStyleSheet("color: #666; font-size: 10px;")
+        self.effective_proj_label.setWordWrap(True)
+        cache_layout.addWidget(self.effective_proj_label)
+        
+        self.cache_root_input.textChanged.connect(self._update_effective_proj_path)
+        
+        layout.addWidget(cache_group)
         
         # === ProRes Transcode Section ===
         prores_group = QtWidgets.QGroupBox("ProRes Transcode")
@@ -543,6 +604,14 @@ class NanoBananaSettingsDialog(QtWidgets.QDialog):
         if dir_path:
             self.temp_dir_input.setText(dir_path)
     
+    def _browse_cache_root(self):
+        dir_path = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Select Project Cache Root",
+            self.cache_root_input.text() or tempfile.gettempdir()
+        )
+        if dir_path:
+            self.cache_root_input.setText(dir_path)
+    
     def _update_effective_path(self):
         custom = self.temp_dir_input.text().strip()
         if custom:
@@ -551,9 +620,24 @@ class NanoBananaSettingsDialog(QtWidgets.QDialog):
             effective = os.path.join(tempfile.gettempdir(), DEFAULT_TEMP_DIR_NAME)
         self.effective_path_label.setText("Effective path: {}".format(effective))
     
+    def _update_effective_proj_path(self):
+        custom = self.cache_root_input.text().strip()
+        try:
+            script_name = get_script_name()
+        except Exception:
+            script_name = UNSAVED_PROJECT_DIR
+        if custom:
+            root = custom
+        else:
+            root = os.path.join(tempfile.gettempdir(), DEFAULT_PROJECT_CACHE_NAME)
+        proj_path = os.path.join(root, script_name)
+        self.effective_proj_label.setText(
+            "Current project cache: {}  (script='{}')".format(proj_path, script_name))
+    
     def _save_settings(self):
         self.settings.api_key = self.api_key_input.text().strip()
         self.settings.temp_directory = self.temp_dir_input.text().strip()
+        self.settings.project_cache_root = self.cache_root_input.text().strip()
         # Save selected ProRes codec
         idx = self.prores.currentIndex()
         if idx >= 0:
@@ -564,31 +648,330 @@ class NanoBananaSettingsDialog(QtWidgets.QDialog):
 
 
 # ---------------------------------------------------------------------------
-# Utility functions for handling input images
+# Project-Aware Directory System
 # ---------------------------------------------------------------------------
-def get_temp_directory():
-    """Get the temporary directory for storing rendered images."""
+def get_script_name():
+    """Get the current Nuke script's base name (without path or extension).
+
+    Returns UNSAVED_PROJECT_DIR (e.g. "_unsaved_") for untitled scripts.
+    This is the key function that isolates caches per .nk file.
+    """
+    try:
+        root_name = nuke.root().name()
+        if root_name in ("", "root", "untitled", "Untitled"):
+            return UNSAVED_PROJECT_DIR
+        # "E:/projects/my_comp.nk" -> "my_comp"
+        basename = os.path.basename(root_name)
+        return os.path.splitext(basename)[0] or UNSAVED_PROJECT_DIR
+    except Exception:
+        return UNSAVED_PROJECT_DIR
+
+
+def get_project_directory():
+    """Get the cache directory for the CURRENT Nuke script/project.
+
+    Returns a per-script directory like:
+      {project_cache_root}/{script_name}/
+    where script_name is the .nk file name (or "_unsaved_" if not saved yet).
+
+    Each project gets its own input/, output/, logs/ subdirectories.
+    """
     settings = NanoBananaSettings()
-    temp_dir = settings.temp_directory
-    if not os.path.exists(temp_dir):
-        os.makedirs(temp_dir)
-    return temp_dir
+    root = settings.project_cache_root
+    script_name = get_script_name()
+    proj_dir = os.path.join(root, script_name)
+    if not os.path.exists(proj_dir):
+        os.makedirs(proj_dir)
+    return proj_dir
+
+
+def get_temp_directory():
+    """Get the temporary (project-aware) directory for storing images.
+
+    DEPRECATED: Prefer get_project_directory() for new code.
+    Kept for backward compatibility — now delegates to get_project_directory().
+    """
+    return get_project_directory()
 
 
 def get_input_directory():
-    """Get the input subdirectory inside temp directory."""
-    input_dir = os.path.join(get_temp_directory(), "input")
+    """Get the input subdirectory inside project directory."""
+    input_dir = os.path.join(get_project_directory(), "input")
     if not os.path.exists(input_dir):
         os.makedirs(input_dir)
     return input_dir
 
 
 def get_output_directory():
-    """Get the output subdirectory inside temp directory."""
-    output_dir = os.path.join(get_temp_directory(), "output")
+    """Get the output subdirectory inside project directory."""
+    output_dir = os.path.join(get_project_directory(), "output")
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     return output_dir
+
+
+def get_logs_directory():
+    """Get the logs subdirectory inside project directory."""
+    logs_dir = os.path.join(get_project_directory(), "logs")
+    if not os.path.exists(logs_dir):
+        os.makedirs(logs_dir)
+    return logs_dir
+
+
+# ---------------------------------------------------------------------------
+# Project Cache Migration System
+# ---------------------------------------------------------------------------
+def _update_node_knob_paths(old_prefix, new_prefix):
+    """After migrating cache files, update absolute paths in all NB node knobs.
+
+    Scans all Group nodes with is_nb_player knob and replaces old_prefix
+    with new_prefix in nb_file, nb_output_path, and nb_input_images JSON.
+    """
+    updated_count = 0
+    for node in nuke.allNodes("Group"):
+        if "is_nb_player" not in node.knobs():
+            continue
+        changed = False
+        # Update nb_file
+        if "nb_file" in node.knobs():
+            old_path = node["nb_file"].value()
+            if old_path and old_prefix in old_path:
+                new_path = old_path.replace(old_prefix, new_prefix, 1)
+                node["nb_file"].setValue(new_path)
+                changed = True
+        # Update nb_output_path
+        if "nb_output_path" in node.knobs():
+            old_path = node["nb_output_path"].value()
+            if old_path and old_prefix in old_path:
+                new_path = old_path.replace(old_prefix, new_prefix, 1)
+                node["nb_output_path"].setValue(new_path)
+                changed = True
+        # Update nb_input_images JSON array
+        if "nb_input_images" in node.knobs():
+            raw = node["nb_input_images"].value()
+            if raw and raw.strip():
+                try:
+                    paths = json.loads(raw)
+                    new_paths = []
+                    for p in paths:
+                        if p and old_prefix in p:
+                            new_paths.append(p.replace(old_prefix, new_prefix, 1))
+                            changed = True
+                        else:
+                            new_paths.append(p)
+                    if changed:
+                        node["nb_input_images"].setValue(json.dumps(new_paths))
+                except (json.JSONDecodeError, TypeError):
+                    pass  # skip malformed JSON
+        if changed:
+            updated_count += 1
+    return updated_count
+
+
+def migrate_project_cache(old_script_name, new_script_name):
+    """Migrate cache from one project directory to another.
+
+    Called when user saves an untitled script (old="_unsaved_") or does Save As.
+    Moves input/output/logs subdirectories and updates all node knob paths.
+
+    Args:
+        old_script_name: Source script name (e.g. "_unsaved_" or "OldProject")
+        new_script_name: Target script name (e.g. "MyComp_v01")
+
+    Returns:
+        Number of files moved, or -1 on error.
+    """
+    settings = NanoBananaSettings()
+    root = settings.project_cache_root
+
+    src_dir = os.path.join(root, old_script_name)
+    dst_dir = os.path.join(root, new_script_name)
+
+    # Nothing to do if source doesn't exist
+    if not os.path.isdir(src_dir):
+        print("[NB Migrate] Source dir '{}' does not exist — nothing to move".format(src_dir))
+        return 0
+
+    # If source == destination (re-save same name), skip
+    if src_dir == dst_dir:
+        return 0
+
+    try:
+        import shutil
+
+        moved_files = 0
+        subdirs = ["input", "output", "logs"]
+        history_file = "history.json"
+
+        # Move each subdirectory that exists
+        for subdir in subdirs:
+            src_sub = os.path.join(src_dir, subdir)
+            if os.path.isdir(src_sub):
+                dst_sub = os.path.join(dst_dir, subdir)
+                os.makedirs(dst_sub, exist_ok=True)
+                # Move individual files (avoid shutil.move which may fail cross-drive)
+                for fname in os.listdir(src_sub):
+                    src_f = os.path.join(src_sub, fname)
+                    dst_f = os.path.join(dst_sub, fname)
+                    if not os.path.exists(dst_f):
+                        shutil.move(src_f, dst_f)
+                        moved_files += 1
+                # Remove empty source sub
+                try:
+                    os.rmdir(src_sub)
+                except OSError:
+                    pass  # not empty or other error, ignore
+
+        # Move history file
+        src_hist = os.path.join(src_dir, history_file)
+        if os.path.isfile(src_hist):
+            os.makedirs(dst_dir, exist_ok=True)
+            dst_hist = os.path.join(dst_dir, history_file)
+            if not os.path.exists(dst_hist):
+                shutil.move(src_hist, dst_hist)
+                moved_files += 1
+
+        # Update node knobs
+        old_prefix = src_dir.replace("\\", "/")
+        new_prefix = dst_dir.replace("\\", "/")
+        nodes_updated = _update_node_knob_paths(old_prefix, new_prefix)
+
+        # Clean up empty source dir
+        try:
+            os.rmdir(src_dir)
+        except OSError:
+            pass
+
+        print("[NB Migrate] {} files moved from '{}' to '{}', {} nodes updated".format(
+            moved_files, old_script_name, new_script_name, nodes_updated))
+        return moved_files
+
+    except Exception as e:
+        print("[NB Migrate] ERROR migrating cache: {}".format(e))
+        import traceback
+        traceback.print_exc()
+        return -1
+
+
+def _on_nuke_script_save():
+    """Callback registered via nuke.addOnScriptSave().
+
+    Detects when the script name changes (untitled -> saved, or Save As)
+    and triggers cache migration.
+    """
+    try:
+        current_name = get_script_name()
+
+        # Get previously stored name (if any)
+        prev_name = getattr(_on_nuke_script_save, "_last_script_name", None)
+
+        if prev_name is None:
+            # First save callback — store and wait for next change
+            _on_nuke_script_save._last_script_name = current_name
+            if current_name != UNSAVED_PROJECT_DIR:
+                print("[NB Save] Script saved as: '{}'".format(current_name))
+            return
+
+        if prev_name == current_name:
+            return  # Same name, normal re-save — nothing to do
+
+        # Name changed! This means Save As or first-save-after-untitled.
+        print("[NB Save] Script renamed: '{}' -> '{}'".format(prev_name, current_name))
+
+        result = migrate_project_cache(prev_name, current_name)
+        if result >= 0:
+            _on_nuke_script_save._last_script_name = current_name
+
+    except Exception as e:
+        print("[NB Save] Error in onScriptSave callback: {}".format(e))
+
+
+# Module-level flag to track whether we've registered the save callback
+_save_callback_registered = False
+
+
+def ensure_save_callback_registered():
+    """Register the onScriptSave callback exactly once."""
+    global _save_callback_registered
+    if not _save_callback_registered:
+        try:
+            nuke.addOnScriptSave(_on_nuke_script_save, args=(), kwargs={},
+                                 nodeClass="Root")
+            _save_callback_registered = True
+            print("[NB] onScriptSave callback registered")
+        except Exception as e:
+            print("[NB] Warning: could not register onScriptSave callback: {}".format(e))
+
+
+# ---------------------------------------------------------------------------
+# Per-Project History (replaces global prompt_history in config)
+# ---------------------------------------------------------------------------
+class ProjectHistory(object):
+    """Manages per-project prompt history stored as {project_dir}/history.json.
+
+    Each .nk script gets its own history file, so Project A's prompts
+    never appear in Project B's dropdown.
+    """
+
+    @staticmethod
+    def _get_file():
+        return os.path.join(get_project_directory(), "history.json")
+
+    @staticmethod
+    def load(key="prompt_history"):
+        """Load history list for *key* from the current project's history.json."""
+        f = ProjectHistory._get_file()
+        if os.path.exists(f):
+            try:
+                with open(f, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                    return data.get(key, [])
+            except Exception:
+                pass
+        # Fallback: try loading from global config (migration path)
+        settings = NanoBananaSettings()
+        return getattr(settings, key) if hasattr(settings, key) else []
+
+    @staticmethod
+    def save(key, value):
+        """Save history list for *key* to the current project's history.json."""
+        f = ProjectHistory._get_file()
+        data = {}
+        if os.path.exists(f):
+            try:
+                with open(f, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except Exception:
+                pass
+        data[key] = value[:20]  # cap at 20 entries
+        try:
+            proj_dir = os.path.dirname(f)
+            if not os.path.exists(proj_dir):
+                os.makedirs(proj_dir)
+            with open(f, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print("[NB History] Save error: {}".format(e))
+
+
+def get_project_prompt_history():
+    """Get prompt history for current project."""
+    return ProjectHistory.load("prompt_history")
+
+
+def set_project_prompt_history(value):
+    """Set prompt history for current project."""
+    ProjectHistory.save("prompt_history", value)
+
+
+def get_project_veo_history():
+    """Get VEO prompt history for current project."""
+    return ProjectHistory.load("veo_prompt_history")
+
+
+def set_project_veo_history(value):
+    """Set VEO prompt history for current project."""
+    ProjectHistory.save("veo_prompt_history", value)
 
 
 def _is_generator_node(node):
@@ -3512,7 +3895,7 @@ class NanoBananaWidget(QtWidgets.QWidget):
 
         self.history_combo = DropDownComboBox()
         self.history_combo.addItem("Select from History...")
-        for h in self.settings.prompt_history:
+        for h in get_project_prompt_history():
             display = h[:40] + "..." if len(h) > 40 else h
             self.history_combo.addItem(display, h)
         self.history_combo.currentIndexChanged.connect(self._on_history_select)
@@ -3590,19 +3973,19 @@ class NanoBananaWidget(QtWidgets.QWidget):
     def _add_to_history(self, prompt):
         if not prompt:
             return
-        history = self.settings.prompt_history
+        history = get_project_prompt_history()
         # Remove duplicate if exists (will be re-inserted at top)
         if prompt in history:
             history.remove(prompt)
         history.insert(0, prompt)
         if len(history) > 20:
             history = history[:20]
-        self.settings.prompt_history = history
+        set_project_prompt_history(history)
 
         self._refresh_history_combo(history)
 
     def _clear_history(self):
-        self.settings.prompt_history = []
+        set_project_prompt_history([])
         self._refresh_history_combo([])
 
     def _refresh_history_combo(self, history):
@@ -4809,7 +5192,12 @@ class NanoBananaWorker(QtCore.QThread):
 
                 log_filename = "banana_request_{}.json".format(
                     datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
-                log_path = os.path.join(self.temp_dir, log_filename)
+                # Use logs directory (project-aware)
+                try:
+                    logs_dir = get_logs_directory()
+                except Exception:
+                    logs_dir = self.temp_dir
+                log_path = os.path.join(logs_dir, log_filename)
                 with open(log_path, "w", encoding="utf-8") as f:
                     json.dump(request_log, f, indent=2, ensure_ascii=False)
                 print("NanoBanana: Request payload saved to {}".format(log_path))
@@ -5566,7 +5954,7 @@ class _NanoBananaPlayerRegenPanel(QtWidgets.QWidget):
             nuke.message("No model set on this player node.")
             return
 
-        output_dir = self.settings.temp_directory
+        output_dir = get_output_directory()
         if not os.path.isdir(output_dir):
             output_dir = os.path.join(os.path.expanduser("~"), ".nuke", "AI_Output")
 
