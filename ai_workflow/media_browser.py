@@ -88,7 +88,7 @@ QFrame#mediaCard:hover {
     border-color: #666666;
 }
 QFrame#mediaCard[selected=\"true\"] {
-    border: 2px solid #facc15;
+    border: 2px solid #3b82f6;
 }
 QLabel#cardName {
     color: #ffffff;
@@ -449,6 +449,13 @@ class MediaCard(QtWidgets.QFrame):
         super(MediaCard, self).mouseDoubleClickEvent(event)
         if event.button() == QtCore.Qt.LeftButton:
             self.doubleClicked.emit(self.node_name, self.media_type)
+
+    def set_selected(self, selected):
+        """Set or clear the visual selected state (blue border via CSS property selector)."""
+        self.setProperty("selected", "true" if selected else "false")
+        # Re-apply stylesheet so the dynamic property takes effect
+        self.style().unpolish(self)
+        self.style().polish(self)
 
 
 
@@ -1428,6 +1435,7 @@ class MediaBrowserPanel(QtWidgets.QWidget):
         self._thumb_queue = []  # cards pending video thumbnail render
         self._thumb_timer = None
         self._resize_timer = None
+        self._selected_node_name = ""  # track currently selected card for back-restore
 
         # Stacked layout: page 0 = grid, page 1 = detail panel
         self._stack = QtWidgets.QStackedLayout(self)
@@ -1658,6 +1666,7 @@ class MediaBrowserPanel(QtWidgets.QWidget):
 
     def _on_card_clicked(self, node_name):
         """Select, zoom to, and connect clicked node to Viewer1."""
+        self._set_selected_card(node_name)
         node = nuke.toNode(node_name)
         if node:
             # Select only this node, deselect others
@@ -1680,8 +1689,20 @@ class MediaBrowserPanel(QtWidgets.QWidget):
         else:
             print("[Media Browser] WARNING: Node '{}' no longer exists".format(node_name))
 
+    def _set_selected_card(self, node_name):
+        """Update visual selection state on all cards."""
+        for name, card in self._cards.items():
+            card.set_selected(name == node_name)
+        self._selected_node_name = node_name
+
+    def _restore_selected_card(self):
+        """After grid refresh, re-apply selection to the previously selected card."""
+        if self._selected_node_name and self._selected_node_name in self._cards:
+            self._cards[self._selected_node_name].set_selected(True)
+
     def _on_card_double_clicked(self, node_name, media_type):
         """Switch to detail panel for the double-clicked card."""
+        self._set_selected_card(node_name)
         self._detail_panel.load_node(node_name, media_type)
         self._stack.setCurrentIndex(1)
 
@@ -1691,6 +1712,8 @@ class MediaBrowserPanel(QtWidgets.QWidget):
         # Trigger a refresh to update any changed thumbnails
         if self._cards:
             self.refresh()
+            # Restore blue highlight on the previously selected card
+            self._restore_selected_card()
 
     def _refresh_single_thumbnail(self):
         """Refresh a single card's thumbnail (called by detail panel after regen)."""
