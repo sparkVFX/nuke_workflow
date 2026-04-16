@@ -142,9 +142,16 @@ class MediaCard(QtWidgets.QFrame):
     """Single media item card showing thumbnail + metadata.
 
     Clicking selects the corresponding node in the DAG.
+    Card size is set dynamically via resize_card() to fit responsive grid.
     """
 
     clicked = QtCore.Signal(str)  # node_name
+
+    # Base design dimensions (original fixed size)
+    BASE_W = 220
+    BASE_H = 260
+    THUMB_BASE_W = 204
+    THUMB_BASE_H = 140
 
     def __init__(self, node_name, media_type, file_path, parent=None):
         super(MediaCard, self).__init__(parent)
@@ -152,21 +159,18 @@ class MediaCard(QtWidgets.QFrame):
         self.node_name = node_name
         self.media_type = media_type  # "image" or "video"
         self.file_path = file_path or ""
-        self.setFixedSize(220, 260)
         self.setCursor(QtCore.Qt.PointingHandCursor)
 
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
+        self._main_layout = QtWidgets.QVBoxLayout(self)
+        self._main_layout.setContentsMargins(8, 8, 8, 8)
+        self._main_layout.setSpacing(6)
 
         # Thumbnail area (label with pixmap)
         self.thumb_label = QtWidgets.QLabel()
         self.thumb_label.setAlignment(QtCore.Qt.AlignCenter)
-        self.thumb_label.setMinimumSize(204, 140)
-        self.thumb_label.setMaximumSize(204, 140)
         self.thumb_label.setStyleSheet(
             "background-color: #1a1a1a; border-radius: 4px; border: 1px solid #2a2a2a;")
-        layout.addWidget(self.thumb_label)
+        self._main_layout.addWidget(self.thumb_label)
 
         # Type badge + Name row
         top_row = QtWidgets.QHBoxLayout()
@@ -180,16 +184,18 @@ class MediaCard(QtWidgets.QFrame):
 
         name_label = QtWidgets.QLabel()
         name_label.setObjectName("cardName")
+        self._name_label = name_label
         _display_name = node_name
         if len(_display_name) > 18:
             _display_name = _display_name[:17] + "\u2026"
         name_label.setText(_display_name)
         top_row.addWidget(name_label)
-        layout.addLayout(top_row)
+        self._main_layout.addLayout(top_row)
 
         # File / info line
         info_label = QtWidgets.QLabel()
         info_label.setObjectName("cardInfo")
+        self._info_label = info_label
         _info = ""
         if file_path:
             _fname = os.path.basename(file_path)
@@ -208,12 +214,34 @@ class MediaCard(QtWidgets.QFrame):
                 pass
         info_label.setText(_info)
         info_label.setToolTip(file_path or "")
-        layout.addWidget(info_label)
+        self._main_layout.addWidget(info_label)
 
-        layout.addStretch()
+        self._main_layout.addStretch()
+
+        # Set default base size (will be overridden by resize_card during layout)
+        self.resize_card(self.BASE_W, self.BASE_H)
 
         # Load thumbnail
         self._load_thumbnail()
+
+    def resize_card(self, card_w, card_h):
+        """Dynamically resize card and its internal elements."""
+        scale = card_w / self.BASE_W  # scaling ratio relative to base
+
+        self.setFixedSize(int(card_w), int(card_h))
+
+        thumb_w = max(10, int(self.THUMB_BASE_W * scale))
+        thumb_h = max(10, int(self.THUMB_BASE_H * scale))
+        self.thumb_label.setFixedSize(thumb_w, thumb_h)
+
+        # Re-scale existing pixmap if present
+        if self.thumb_label.pixmap() and not self.thumb_label.pixmap().isNull():
+            pix = self.thumb_label.pixmap()
+            scaled = pix.scaled(
+                thumb_w, thumb_h,
+                QtCore.Qt.KeepAspectRatio,
+                QtCore.Qt.SmoothTransformation)
+            self.thumb_label.setPixmap(scaled)
 
     def _load_thumbnail(self):
         """Try to load a preview image for this media."""
@@ -227,8 +255,10 @@ class MediaCard(QtWidgets.QFrame):
             # Image file — load directly
             pix = QtGui.QPixmap(self.file_path)
             if not pix.isNull():
+                tw = self.thumb_label.width()
+                th = self.thumb_label.height()
                 scaled = pix.scaled(
-                    204, 140,
+                    tw, th,
                     QtCore.Qt.KeepAspectRatio,
                     QtCore.Qt.SmoothTransformation)
                 self.thumb_label.setPixmap(scaled)
@@ -280,8 +310,10 @@ class MediaCard(QtWidgets.QFrame):
             if result.returncode == 0 and os.path.isfile(out_path):
                 pix = QtGui.QPixmap(out_path)
                 if not pix.isNull():
+                    tw = self.thumb_label.width()
+                    th = self.thumb_label.height()
                     scaled = pix.scaled(
-                        204, 140,
+                        tw, th,
                         QtCore.Qt.KeepAspectRatio,
                         QtCore.Qt.SmoothTransformation)
                     self.thumb_label.setPixmap(scaled)
@@ -296,22 +328,24 @@ class MediaCard(QtWidgets.QFrame):
 
     def _show_placeholder(self):
         """Show placeholder when no image is available."""
-        pm = QtGui.QPixmap(204, 140)
+        tw = max(10, self.thumb_label.width())
+        th = max(10, self.thumb_label.height())
+        pm = QtGui.QPixmap(tw, th)
         pm.fill(QtGui.QColor("#1a1a1a"))
         painter = QtGui.QPainter(pm)
         pen = QtGui.QPen(QtGui.QColor("#444444"))
         pen.setWidth(2)
         painter.setPen(pen)
-        painter.drawRect(2, 2, 200, 136)
+        painter.drawRect(2, 2, tw - 4, th - 4)
         icon_color = QtGui.QColor("#555555") if self.media_type == "video" else QtGui.QColor("#3b82f6")
         painter.setPen(QtGui.QPen(icon_color))
         font = painter.font()
-        font.setPixelSize(32)
+        font.setPixelSize(max(12, int(32 * (tw / self.THUMB_BASE_W))))
         painter.setFont(font)
         icon = "\u25B6" if self.media_type == "video" else "\u25A0"
         rect = painter.fontMetrics().boundingRect(icon)
-        x = (204 - rect.width()) // 2
-        y = (140 - rect.height()) // 2
+        x = (tw - rect.width()) // 2
+        y = (th - rect.height()) // 2
         painter.drawText(x, y + rect.height(), icon)
         painter.end()
         self.thumb_label.setPixmap(pm)
@@ -392,7 +426,7 @@ class MediaBrowserPanel(QtWidgets.QWidget):
         self.scroll_area = scroll
 
     def refresh(self):
-        """Scan all nodes and rebuild the card grid."""
+        """Scan all nodes and rebuild the card grid with responsive sizing."""
         # Stop any pending thumbnail renders
         self._thumb_queue = []
         if self._thumb_timer is not None:
@@ -416,14 +450,30 @@ class MediaBrowserPanel(QtWidgets.QWidget):
             self.count_label.setText("0 items")
             return
 
+        # ---- Responsive grid calculation (AssetsManager-qt approach) ----
+        spacing = self.card_layout.spacing()  # horizontal + vertical gap between cards
+        margin_h = 16  # approximate horizontal margins of scroll_content (contentsMargins ~12*2)
+        available_width = self.scroll_area.viewport().width()
+
+        # Minimum card width — cards can shrink to this but not below
+        MIN_CARD_W = 170
+        # Base card dimensions (design reference)
+        BASE_CARD_W = MediaCard.BASE_W   # 220
+        BASE_CARD_H = MediaCard.BASE_H   # 260
+        ASPECT = BASE_CARD_H / BASE_CARD_W  # height/width ratio
+
+        # Step 1: determine column count from minimum cell size
+        min_cell_w = MIN_CARD_W + spacing
+        max_cols = max(1, int((available_width - margin_h) // min_cell_w))
+
+        # Step 2: calculate exact cell width by evenly dividing usable area
+        usable_w = available_width - margin_h
+        cell_w = usable_w / max_cols          # float: each grid cell's width
+        card_w = max(MIN_CARD_W, cell_w - spacing)  # actual card pixel width
+        card_h = card_w * ASPECT              # maintain aspect ratio
+
         col = 0
         row = 0
-        available_width = self.scroll_area.viewport().width()
-        card_w = 220  # MediaCard setFixedSize(220, 260)
-        spacing = self.card_layout.spacing()
-        unit = card_w + spacing  # one column unit width
-        max_cols = max(1, available_width // unit)
-
         pending_video_cards = []
         for entry in items:
             card = MediaCard(
@@ -431,6 +481,8 @@ class MediaBrowserPanel(QtWidgets.QWidget):
                 media_type=entry["type"],
                 file_path=entry["file"],
             )
+            # Apply dynamic sizing BEFORE adding to layout
+            card.resize_card(card_w, card_h)
             card.clicked.connect(self._on_card_clicked)
             self.card_layout.addWidget(card, row, col, QtCore.Qt.AlignCenter)
             self._cards[entry["name"]] = card
@@ -445,11 +497,6 @@ class MediaBrowserPanel(QtWidgets.QWidget):
         # Make columns stretch evenly to fill full width
         for c in range(max_cols):
             self.card_layout.setColumnStretch(c, 1)
-
-        # Force scroll_content geometry to sync with current viewport (shrink only)
-        vp_w = self.scroll_area.viewport().width()
-        if self.scroll_content.width() > vp_w:
-            self.scroll_content.setGeometry(0, 0, vp_w, self.scroll_content.height())
 
         video_count = sum(1 for i in items if i["type"] == "video")
         image_count = len(items) - video_count
