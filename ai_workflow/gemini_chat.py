@@ -7,21 +7,15 @@ Opens a floating panel (not a node) with:
 - Model selection
 - Text input + Send button
 
-Uses the same shared API key from NanoBananaSettings.
+Uses the same shared API key from AppSettings (core.settings).
 """
 
-try:
-    from PySide6 import QtWidgets, QtCore, QtGui
-    from shiboken6 import isValid as _isValid
-except ImportError:
-    try:
-        from PySide2 import QtWidgets, QtCore, QtGui
-        from shiboken2 import isValid as _isValid
-    except ImportError:
-        from PySide import QtGui as QtWidgets
-        from PySide import QtCore, QtGui
-        def _isValid(obj):
-            return True
+# ---------------------------------------------------------------------------
+# Shared imports from ai_workflow.core
+# ---------------------------------------------------------------------------
+from ai_workflow.core.pyside_compat import QtWidgets, QtCore, QtGui, _isValid
+from ai_workflow.core.settings import AppSettings as NanoBananaSettings, app_settings
+from ai_workflow.core.ui_components import DropDownComboBox, SHARED_DARK_STYLE
 
 import nuke
 import nukescripts
@@ -1905,7 +1899,7 @@ class GeminiChatPanel(QtWidgets.QWidget):
         """Install a global ESC QShortcut on the panel so users can cancel
         an in-flight Gemini request at any time."""
         from ai_workflow.status_bar import task_progress_manager
-        esc = QtGui.QShortcut(
+        esc = QtWidgets.QShortcut(
             QtGui.QKeySequence(QtCore.Qt.Key_Escape), self
         )
         esc.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
@@ -2218,7 +2212,6 @@ class GeminiChatPanel(QtWidgets.QWidget):
             image = clipboard.image()
             if not image.isNull():
                 # Save to temp
-                from ai_workflow.nanobanana import NanoBananaSettings
                 settings = NanoBananaSettings()
                 temp_dir = settings.temp_directory
                 fname = "clipboard_{}.png".format(
@@ -2339,8 +2332,6 @@ class GeminiChatPanel(QtWidgets.QWidget):
         try:
             from google import genai
             from google.genai import types
-            from ai_workflow.nanobanana import NanoBananaSettings
-
             settings = NanoBananaSettings()
             api_key = settings.api_key
             if not api_key:

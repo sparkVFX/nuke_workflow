@@ -55,6 +55,7 @@ def create_node_generate_video_kling():
 
 def open_settings():
     """Open the shared AI Workflow settings dialog (API key, temp directory)."""
+    from ai_workflow.core.settings import AppSettings
     from ai_workflow.nanobanana import NanoBananaSettingsDialog
     dialog = NanoBananaSettingsDialog()
     dialog.exec_()
@@ -75,12 +76,12 @@ def _render_node_output(node, render_all_frames=False):
     Returns:
         File path of the rendered temp file, or None on failure.
     """
-    from ai_workflow.nanobanana import render_input_to_file_silent
+    from ai_workflow.core.rendering import render_input_to_file_silent
 
     # Determine temp directory (use settings if available)
     try:
-        from ai_workflow.nanobanana import _get_temp_dir
-        temp_dir = _get_temp_dir()
+        from ai_workflow.core.directories import get_temp_directory
+        temp_dir = get_temp_directory()
     except Exception:
         temp_dir = tempfile.gettempdir()
 
