@@ -18,15 +18,7 @@ def image_to_base64(image_path):
 
 def get_mime_type(image_path):
     """Get MIME type based on file extension."""
-    ext = os.path.splitext(image_path)[1].lower()
-    mime_types = {
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".gif": "image/gif",
-        ".webp": "image/webp"
-    }
-    return mime_types.get(ext, "image/png")
+    return guess_mime_type(image_path, default="image/png")
 
 
 def call_gemini_api(api_key, model, contents, generation_config):

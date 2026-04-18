@@ -18,7 +18,14 @@ Workflow:
 # ---------------------------------------------------------------------------
 from ai_workflow.core.pyside_compat import QtWidgets, QtCore, QtGui, _isValid
 from ai_workflow.core.ui_components import DropDownComboBox, SHARED_DARK_STYLE
+from ai_workflow.core.model_catalog import (
+    NB_MODEL_OPTIONS,
+    NB_RATIO_OPTIONS,
+    NB_RESOLUTION_OPTIONS,
+    fill_combo_from_options,
+)
 from ai_workflow.core.settings import (
+
     AppSettings as NanoBananaSettings,
     app_settings,
     CONFIG_FILE_NAME, DEFAULT_TEMP_DIR_NAME,
@@ -676,13 +683,7 @@ class NanoBananaWidget(QtWidgets.QWidget):
 
         # === Model ===
         self.model_combo = DropDownComboBox()
-        # Image generation models with multi-image support
-        self.model_combo.addItem("Gemini 3.1 Flash - Nano Banana 2", "gemini-3.1-flash-image-preview")
-        self.model_combo.addItem("Gemini 3 Pro - Nano Banana Pro", "gemini-3-pro-image-preview")
-        self.model_combo.addItem("Gemini 2.5 Flash - Nano Banana", "gemini-2.5-flash-image")
-        # Additional models
-        self.model_combo.addItem("Gemini 2.0 Flash Exp (Image Gen)", "gemini-2.0-flash-exp-image-generation")
-        self.model_combo.addItem("Imagen 3.0 Generate", "imagen-3.0-generate-002")
+        fill_combo_from_options(self.model_combo, NB_MODEL_OPTIONS)
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
         self.model_combo.currentIndexChanged.connect(lambda _: self._save_all_state_to_node())
         main.addWidget(self.model_combo)
@@ -692,13 +693,11 @@ class NanoBananaWidget(QtWidgets.QWidget):
         row2.setSpacing(6)
 
         self.ratio_combo = DropDownComboBox()
-        self.ratio_combo.addItems(["Auto", "1:1", "16:9", "9:16", "4:3", "3:4", "21:9", "4:5"])
+        fill_combo_from_options(self.ratio_combo, NB_RATIO_OPTIONS)
         self.ratio_combo.currentIndexChanged.connect(lambda _: self._save_all_state_to_node())
 
         self.res_combo = DropDownComboBox()
-        self.res_combo.addItem("1K", "1K")
-        self.res_combo.addItem("2K", "2K")
-        self.res_combo.addItem("4K", "4K")
+        fill_combo_from_options(self.res_combo, NB_RESOLUTION_OPTIONS)
         self.res_combo.currentIndexChanged.connect(lambda _: self._save_all_state_to_node())
 
         row2.addWidget(self.ratio_combo)
@@ -1423,11 +1422,7 @@ class NanoBananaPromptWidget(QtWidgets.QWidget):
 
         # === Model ===
         self.model_combo = DropDownComboBox()
-        self.model_combo.addItem("Gemini 3.1 Flash - Nano Banana 2", "gemini-3.1-flash-image-preview")
-        self.model_combo.addItem("Gemini 3 Pro - Nano Banana Pro", "gemini-3-pro-image-preview")
-        self.model_combo.addItem("Gemini 2.5 Flash - Nano Banana", "gemini-2.5-flash-image")
-        self.model_combo.addItem("Gemini 2.0 Flash Exp (Image Gen)", "gemini-2.0-flash-exp-image-generation")
-        self.model_combo.addItem("Imagen 3.0 Generate", "imagen-3.0-generate-002")
+        fill_combo_from_options(self.model_combo, NB_MODEL_OPTIONS)
         main.addWidget(self.model_combo)
 
         # === Ratio + Resolution ===
@@ -1435,12 +1430,10 @@ class NanoBananaPromptWidget(QtWidgets.QWidget):
         row2.setSpacing(6)
 
         self.ratio_combo = DropDownComboBox()
-        self.ratio_combo.addItems(["Auto", "1:1", "16:9", "9:16", "4:3", "3:4", "21:9", "4:5"])
+        fill_combo_from_options(self.ratio_combo, NB_RATIO_OPTIONS)
 
         self.res_combo = DropDownComboBox()
-        self.res_combo.addItem("1K", "1K")
-        self.res_combo.addItem("2K", "2K")
-        self.res_combo.addItem("4K", "4K")
+        fill_combo_from_options(self.res_combo, NB_RESOLUTION_OPTIONS)
 
         row2.addWidget(self.ratio_combo)
         row2.addWidget(self.res_combo)
@@ -2232,20 +2225,15 @@ class _NanoBananaPlayerRegenPanel(QtWidgets.QWidget):
 
         # Model combo
         self.model_combo = DropDownComboBox()
-        self.model_combo.addItem("Gemini 3.1 Flash", "gemini-3.1-flash-image-preview")
-        self.model_combo.addItem("Gemini 3 Pro", "gemini-3-pro-image-preview")
-        self.model_combo.addItem("Gemini 2.5 Flash", "gemini-2.5-flash-image")
-        self.model_combo.addItem("Imagen 3.0", "imagen-3.0-generate-002")
+        fill_combo_from_options(self.model_combo, NB_MODEL_OPTIONS)
         main.addWidget(self.model_combo)
 
         row2 = QtWidgets.QHBoxLayout()
         row2.setSpacing(6)
         self.ratio_combo = DropDownComboBox()
-        self.ratio_combo.addItems(["Auto", "1:1", "16:9", "9:16", "4:3", "3:4"])
+        fill_combo_from_options(self.ratio_combo, NB_RATIO_OPTIONS)
         self.res_combo = DropDownComboBox()
-        self.res_combo.addItem("1K", "1K")
-        self.res_combo.addItem("2K", "2K")
-        self.res_combo.addItem("4K", "4K")
+        fill_combo_from_options(self.res_combo, NB_RESOLUTION_OPTIONS)
         row2.addWidget(self.ratio_combo)
         row2.addWidget(self.res_combo)
         main.addLayout(row2)

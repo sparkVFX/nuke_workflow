@@ -23,7 +23,21 @@ Mode input mapping:
 # ---------------------------------------------------------------------------
 from ai_workflow.core.pyside_compat import QtWidgets, QtCore, QtGui, _isValid
 from ai_workflow.core.ui_components import DropDownComboBox, SHARED_DARK_STYLE
+from ai_workflow.core.model_catalog import (
+    VEO_MODEL_OPTIONS,
+    VEO_RATIO_OPTIONS,
+    VEO_RESOLUTION_OPTIONS,
+    VEO_DURATION_OPTIONS,
+    fill_combo_from_options,
+)
+from ai_workflow.core.history_store import (
+    get_history,
+    set_history,
+    push_history_item,
+)
 from ai_workflow.core.settings import (
+
+
     AppSettings as NanoBananaSettings,
     app_settings,
     CONFIG_FILE_NAME, DEFAULT_TEMP_DIR_NAME,
@@ -297,7 +311,7 @@ class VeoWorker(QtCore.QThread):
         self.prompt = prompt
         self.negative_prompt = negative_prompt
         self.reference_image_paths = reference_image_paths or []
-        self.model = VEO_MODELS.get(model, VEO_MODELS[VEO_MODEL_DEFAULT])
+        self.model = resolve_video_model_id(model)
         self.aspect_ratio = aspect_ratio
         self.duration = duration
         self.resolution = resolution
@@ -323,73 +337,24 @@ class VeoWorker(QtCore.QThread):
             if not self.is_running:
                 return
 
-            # 2. Build generation config
-            config_kwargs = {}
-            if self.aspect_ratio:
-                config_kwargs["aspect_ratio"] = self.aspect_ratio
+            # 2. Build generation payload via adapter registry
+            adapter = get_video_adapter(self.model)
+            if not adapter:
+                self.error.emit("No video adapter registered for model: {}".format(self.model))
+                return
 
-            # Parse duration: "4" -> 4, "6" -> 6, "8" -> 8, "4s" -> 4
-            dur_seconds = 8  # default
-            if self.duration:
-                dur_str = str(self.duration).replace("s", "").strip()
-                try:
-                    dur_val = int(dur_str)
-                    if 4 <= dur_val <= 8:
-                        dur_seconds = dur_val
-                except (ValueError, TypeError):
-                    pass
+            generate_kwargs, config_kwargs, mode_str, dur_seconds = adapter.build_generate_kwargs(
+                prompt=self.prompt,
+                mode=self.mode,
+                ref_images=ref_images,
+                aspect_ratio=self.aspect_ratio,
+                duration=self.duration,
+                resolution=self.resolution,
+                types_module=types,
+            )
 
-            # Build config and generate_kwargs based on mode
             has_refs = len(ref_images) > 0
 
-            # Force 8s per Google Veo 3.1 API constraints:
-            #   - Frames (first+last frame) mode: ALWAYS 8s (any resolution)
-            #   - 1080p / 4k resolution: ALWAYS 8s (any mode)
-            #   - Text / FirstFrame / Ingredients @ 720p: user can choose 4/6/8s
-            if self.mode == "Frames":
-                dur_seconds = 8
-            if self.resolution and self.resolution.lower() in ("1080p", "4k"):
-                dur_seconds = 8
-
-            config_kwargs["duration_seconds"] = dur_seconds
-
-            # Set resolution (API accepts "720p", "1080p", "4k")
-            if self.resolution:
-                config_kwargs["resolution"] = self.resolution.lower()
-
-            generate_kwargs = {
-                "model": self.model,
-                "prompt": self.prompt,
-            }
-
-            if self.mode == "Frames" and len(ref_images) >= 2:
-                # Frames mode: first frame as image param, last frame in config
-                first_image = ref_images[0]
-                last_image = ref_images[1]
-                config_kwargs["last_frame"] = last_image
-                generate_kwargs["image"] = first_image
-                mode_str = "frames (first+last)"
-            elif self.mode == "Frames" and len(ref_images) == 1:
-                # Only first frame provided (fallback)
-                generate_kwargs["image"] = ref_images[0]
-                mode_str = "frames (first only)"
-            elif self.mode == "FirstFrame" and len(ref_images) >= 1:
-                # FirstFrame mode: only first frame as image param
-                generate_kwargs["image"] = ref_images[0]
-                mode_str = "first-frame"
-            elif has_refs:
-                # Ingredients mode: reference images as assets
-                config_kwargs["reference_images"] = [
-                    types.VideoGenerationReferenceImage(
-                        image=ri, reference_type="asset"
-                    ) for ri in ref_images
-                ]
-                mode_str = "ref-to-video ({} refs)".format(len(ref_images))
-            else:
-                mode_str = "text-to-video"
-
-            config = types.GenerateVideosConfig(**config_kwargs)
-            generate_kwargs["config"] = config
 
             # 3. Call generate_videos
             self.status_update.emit("Starting video generation ({})...".format(mode_str))
@@ -595,8 +560,7 @@ class VeoWidget(QtWidgets.QWidget):
         model_label.setStyleSheet("color: #aaa; font-size: 11px;")
         model_group.addWidget(model_label)
         self.model_combo = DropDownComboBox()
-        self.model_combo.addItem("Google VEO 3.1-Fast", "veo-3.1-fast-generate-preview")
-        self.model_combo.addItem("Google VEO 3.1", "veo-3.1-generate-preview")
+        fill_combo_from_options(self.model_combo, VEO_MODEL_OPTIONS)
         self.model_combo.currentIndexChanged.connect(lambda _: self._save_all_state_to_node())
         model_group.addWidget(self.model_combo)
         config_row.addLayout(model_group, 2)
@@ -608,7 +572,7 @@ class VeoWidget(QtWidgets.QWidget):
         ratio_label.setStyleSheet("color: #aaa; font-size: 11px;")
         ratio_group.addWidget(ratio_label)
         self.ratio_combo = DropDownComboBox()
-        self.ratio_combo.addItems(["16:9", "9:16"])
+        fill_combo_from_options(self.ratio_combo, VEO_RATIO_OPTIONS)
         self.ratio_combo.currentIndexChanged.connect(lambda _: self._save_all_state_to_node())
         ratio_group.addWidget(self.ratio_combo)
         config_row.addLayout(ratio_group, 1)
@@ -620,7 +584,7 @@ class VeoWidget(QtWidgets.QWidget):
         res_label.setStyleSheet("color: #aaa; font-size: 11px;")
         res_group.addWidget(res_label)
         self.res_combo = DropDownComboBox()
-        self.res_combo.addItems(["720P", "1080P"])
+        fill_combo_from_options(self.res_combo, VEO_RESOLUTION_OPTIONS)
         self.res_combo.currentIndexChanged.connect(lambda _: self._update_duration_for_mode())
         self.res_combo.currentIndexChanged.connect(lambda _: self._save_all_state_to_node())
         res_group.addWidget(self.res_combo)
@@ -633,9 +597,7 @@ class VeoWidget(QtWidgets.QWidget):
         dur_label.setStyleSheet("color: #aaa; font-size: 11px;")
         dur_group.addWidget(dur_label)
         self.dur_combo = DropDownComboBox()
-        self.dur_combo.addItem("4", "4")
-        self.dur_combo.addItem("6", "6")
-        self.dur_combo.addItem("8", "8")
+        fill_combo_from_options(self.dur_combo, VEO_DURATION_OPTIONS)
         self.dur_combo.setCurrentIndex(2)  # default 8
         self.dur_combo.currentIndexChanged.connect(lambda _: self._save_all_state_to_node())
         dur_group.addWidget(self.dur_combo)
@@ -670,7 +632,7 @@ class VeoWidget(QtWidgets.QWidget):
 
         self.history_combo = DropDownComboBox()
         self.history_combo.addItem("Select from History...")
-        for h in self.settings.veo_prompt_history[:10]:
+        for h in get_history("veo_prompt_history", scope="project", limit=10):
             display = h[:40] + "..." if len(h) > 40 else h
             self.history_combo.addItem(display, h)
         self.history_combo.currentIndexChanged.connect(self._on_history_select)
@@ -961,19 +923,11 @@ class VeoWidget(QtWidgets.QWidget):
     def _add_to_history(self, prompt):
         if not prompt:
             return
-        history = self.settings.veo_prompt_history
-        # Remove duplicate if exists (will be re-inserted at top)
-        if prompt in history:
-            history.remove(prompt)
-        history.insert(0, prompt)
-        if len(history) > 10:
-            history = history[:10]
-        self.settings.veo_prompt_history = history
-
-        self._refresh_history_combo(history)
+        push_history_item("veo_prompt_history", prompt, scope="project", limit=10)
+        self._refresh_history_combo(get_history("veo_prompt_history", scope="project", limit=10))
 
     def _clear_history(self):
-        self.settings.veo_prompt_history = []
+        set_history("veo_prompt_history", [], scope="project", limit=10)
         self._refresh_history_combo([])
 
     def _refresh_history_combo(self, history):
@@ -1594,8 +1548,7 @@ class VeoRecordWidget(QtWidgets.QWidget):
         model_lbl.setStyleSheet("color: #aaa; font-size: 11px;")
         model_group.addWidget(model_lbl)
         self.model_combo = DropDownComboBox()
-        self.model_combo.addItem("Google VEO 3.1-Fast", "veo-3.1-fast-generate-preview")
-        self.model_combo.addItem("Google VEO 3.1", "veo-3.1-generate-preview")
+        fill_combo_from_options(self.model_combo, VEO_MODEL_OPTIONS)
         model_group.addWidget(self.model_combo)
         config_row.addLayout(model_group, 2)
 
@@ -1606,7 +1559,7 @@ class VeoRecordWidget(QtWidgets.QWidget):
         ratio_lbl.setStyleSheet("color: #aaa; font-size: 11px;")
         ratio_group.addWidget(ratio_lbl)
         self.ratio_combo = DropDownComboBox()
-        self.ratio_combo.addItems(["16:9", "9:16"])
+        fill_combo_from_options(self.ratio_combo, VEO_RATIO_OPTIONS)
         ratio_group.addWidget(self.ratio_combo)
         config_row.addLayout(ratio_group, 1)
 
@@ -1617,7 +1570,7 @@ class VeoRecordWidget(QtWidgets.QWidget):
         res_lbl.setStyleSheet("color: #aaa; font-size: 11px;")
         res_group.addWidget(res_lbl)
         self.res_combo = DropDownComboBox()
-        self.res_combo.addItems(["720P", "1080P"])
+        fill_combo_from_options(self.res_combo, VEO_RESOLUTION_OPTIONS)
         self.res_combo.currentIndexChanged.connect(lambda _: self._update_duration_constraints())
         res_group.addWidget(self.res_combo)
         config_row.addLayout(res_group, 1)
@@ -1629,9 +1582,7 @@ class VeoRecordWidget(QtWidgets.QWidget):
         dur_lbl.setStyleSheet("color: #aaa; font-size: 11px;")
         dur_group.addWidget(dur_lbl)
         self.dur_combo = DropDownComboBox()
-        self.dur_combo.addItem("4", "4")
-        self.dur_combo.addItem("6", "6")
-        self.dur_combo.addItem("8", "8")
+        fill_combo_from_options(self.dur_combo, VEO_DURATION_OPTIONS)
         self.dur_combo.setCurrentIndex(2)  # default 8
         dur_group.addWidget(self.dur_combo)
         config_row.addLayout(dur_group, 1)

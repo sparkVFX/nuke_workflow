@@ -16,6 +16,9 @@ Uses the same shared API key from AppSettings (core.settings).
 from ai_workflow.core.pyside_compat import QtWidgets, QtCore, QtGui, _isValid
 from ai_workflow.core.settings import AppSettings as NanoBananaSettings, app_settings
 from ai_workflow.core.ui_components import DropDownComboBox, SHARED_DARK_STYLE
+from ai_workflow.core.model_catalog import CHAT_MODELS
+from ai_workflow.core.mime_types import SUPPORTED_MIME_MAP, INLINE_MIME_EXTENSIONS
+
 
 import nuke
 import nukescripts
@@ -45,50 +48,10 @@ if not _log.handlers:
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-CHAT_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.5-pro",
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
-    "gemini-1.5-flash",
-    "gemini-1.5-pro",
-]
-
 SESSIONS_DIR_NAME = "gemini_chat_sessions"
-
-# Gemini API supported file types and their MIME types
-SUPPORTED_MIME_MAP = {
-    # Images
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-    # PDF
-    ".pdf": "application/pdf",
-    # Microsoft Office
-    ".doc": "application/msword",
-    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ".ppt": "application/vnd.ms-powerpoint",
-    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    ".xls": "application/vnd.ms-excel",
-    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    # Plain text / rich text
-    ".txt": "text/plain",
-    ".rtf": "application/rtf",
-    # Structured data
-    ".csv": "text/csv",
-    ".tsv": "text/tab-separated-values",
-}
 SUPPORTED_EXTENSIONS = set(SUPPORTED_MIME_MAP.keys())
-
-# Formats that can be sent inline via Part.from_bytes()
-# (images, plain text, csv/tsv are small and supported inline)
-INLINE_MIME_EXTENSIONS = {
-    ".png", ".jpg", ".jpeg", ".gif", ".webp",
-    ".txt", ".csv", ".tsv", ".rtf",
-}
 # All other supported formats (pdf, office docs) must be uploaded via client.files.upload()
+
 
 # ---------------------------------------------------------------------------
 # Style

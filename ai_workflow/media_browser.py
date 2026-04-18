@@ -13,18 +13,19 @@ import threading
 import nuke
 import nukescripts
 
-try:
-    from PySide6 import QtWidgets, QtCore, QtGui
-    from shiboken6 import isValid as _isValid
-except ImportError:
-    try:
-        from PySide2 import QtWidgets, QtCore, QtGui
-        from shiboken2 import isValid as _isValid
-    except ImportError:
-        from PySide import QtGui as QtWidgets
-        from PySide import QtCore, QtGui
-        def _isValid(obj):
-            return True
+from ai_workflow.core.pyside_compat import QtWidgets, QtCore, QtGui, _isValid
+from ai_workflow.core.model_catalog import (
+    NB_MODEL_OPTIONS,
+    NB_RATIO_OPTIONS,
+    NB_RESOLUTION_OPTIONS,
+    VEO_MODEL_OPTIONS,
+    VEO_RATIO_OPTIONS,
+    VEO_RESOLUTION_OPTIONS,
+    VEO_DURATION_OPTIONS,
+    VEO_MODE_OPTIONS,
+    fill_combo_from_options,
+)
+
 
 
 # ---------------------------------------------------------------------------
@@ -224,8 +225,68 @@ QPushButton#stopBtnDetail {
 
 
 # ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+def _extract_video_thumb_pixmap(video_path, target_w, target_h, temp_tag):
+    """Extract first frame with ffmpeg and return scaled QPixmap (or None)."""
+    try:
+        from ai_workflow.veo import _find_ffmpeg
+        ffmpeg = _find_ffmpeg()
+    except Exception:
+        ffmpeg = None
+
+    if not ffmpeg or not video_path or not os.path.isfile(video_path):
+        return None
+
+    out_path = os.path.join(
+        tempfile.gettempdir(),
+        "_mb_{}_{}.png".format(temp_tag, int(time.time())))
+
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-i", video_path,
+        "-vframes", "1",
+        "-q:v", "2",
+        out_path,
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        if result.returncode != 0 or not os.path.isfile(out_path):
+            return None
+
+        pix = QtGui.QPixmap(out_path)
+        if pix.isNull():
+            return None
+
+        return pix.scaled(
+            target_w,
+            target_h,
+            QtCore.Qt.KeepAspectRatio,
+            QtCore.Qt.SmoothTransformation,
+        )
+    except Exception:
+        return None
+    finally:
+        try:
+            if os.path.isfile(out_path):
+                os.remove(out_path)
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Media card widget
 # ---------------------------------------------------------------------------
+
 
 class MediaCard(QtWidgets.QFrame):
     """Single media item card showing thumbnail + metadata.
@@ -631,41 +692,13 @@ class MediaDetailPanel(QtWidgets.QWidget):
 
     def _extract_video_preview(self, video_path, target_w, target_h):
         """Extract first frame of video for detail preview."""
-        try:
-            ffmpeg = None
-            try:
-                from ai_workflow.veo import _find_ffmpeg
-                ffmpeg = _find_ffmpeg()
-            except Exception:
-                pass
-            if not ffmpeg:
-                self._show_preview_placeholder()
-                return
-            out_path = os.path.join(
-                tempfile.gettempdir(),
-                "_mb_detail_{}_{}.png".format(
-                    self.node.name().replace("/", "_"), int(time.time())))
-            cmd = [ffmpeg, "-y", "-i", video_path, "-vframes", "1",
-                   "-q:v", "2", out_path]
-            subprocess.run(
-                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=15,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
-            if os.path.isfile(out_path):
-                pix = QtGui.QPixmap(out_path)
-                if not pix.isNull():
-                    scaled = pix.scaled(target_w, target_h,
-                                        QtCore.Qt.KeepAspectRatio,
-                                        QtCore.Qt.SmoothTransformation)
-                    self._preview_label.setPixmap(scaled)
-                try:
-                    os.remove(out_path)
-                except Exception:
-                    pass
-                return
-        except Exception:
-            pass
+        tag = "detail_{}".format((self.node.name() if self.node else "unknown").replace("/", "_"))
+        pix = _extract_video_thumb_pixmap(video_path, target_w, target_h, tag)
+        if pix is not None:
+            self._preview_label.setPixmap(pix)
+            return
         self._show_preview_placeholder()
+
 
     # ------------------------------------------------------------------
     # IMAGE mode (NanoBanana) parameters
@@ -921,10 +954,14 @@ class MediaDetailPanel(QtWidgets.QWidget):
         mode_lbl.setStyleSheet("color: #aaa; font-size: 11px; background: transparent;")
         self.veo_mode_combo = QtWidgets.QComboBox()
         self.veo_mode_combo.setObjectName("paramCombo")
-        self.veo_mode_combo.addItem("Text to Video", "Text")
-        self.veo_mode_combo.addItem("Image to Video (First Frame)", "FirstFrame")
-        self.veo_mode_combo.addItem("Image to Video (Frames)", "Frames")
-        self.veo_mode_combo.addItem("Reference Ingredients", "Ingredients")
+        veo_mode_labels = {
+            "Text": "Text to Video",
+            "FirstFrame": "Image to Video (First Frame)",
+            "Frames": "Image to Video (Frames)",
+            "Ingredients": "Reference Ingredients",
+        }
+        for mode_name, mode_value in VEO_MODE_OPTIONS:
+            self.veo_mode_combo.addItem(veo_mode_labels.get(mode_value, mode_name), mode_value)
         mode_row.addWidget(mode_lbl)
         mode_row.addWidget(self.veo_mode_combo, 1)
         pl.addLayout(mode_row)
@@ -932,8 +969,9 @@ class MediaDetailPanel(QtWidgets.QWidget):
         # Model combo
         self.veo_model_combo = QtWidgets.QComboBox()
         self.veo_model_combo.setObjectName("paramCombo")
-        self.veo_model_combo.addItem("Google VEO 3.1-Fast", "Google VEO 3.1-Fast")
-        self.veo_model_combo.addItem("Google VEO 3.1", "Google VEO 3.1")
+        for model_name, _model_id in VEO_MODEL_OPTIONS:
+            # Viewer 节点里保存的是显示名，保持兼容
+            self.veo_model_combo.addItem(model_name, model_name)
         pl.addWidget(self.veo_model_combo)
 
         # Ratio + Duration + Resolution
@@ -941,21 +979,20 @@ class MediaDetailPanel(QtWidgets.QWidget):
         row2.setSpacing(6)
         self.veo_ratio_combo = QtWidgets.QComboBox()
         self.veo_ratio_combo.setObjectName("paramCombo")
-        self.veo_ratio_combo.addItems(["16:9", "9:16", "1:1"])
+        fill_combo_from_options(self.veo_ratio_combo, VEO_RATIO_OPTIONS)
         self.veo_dur_combo = QtWidgets.QComboBox()
         self.veo_dur_combo.setObjectName("paramCombo")
-        for d in ["4", "6", "8"]:
-            self.veo_dur_combo.addItem("{}s".format(d), d)
-        self.veo_dur_combo.setCurrentIndex(2)
+        for duration_name, duration_val in VEO_DURATION_OPTIONS:
+            self.veo_dur_combo.addItem("{}s".format(duration_name), duration_val)
+        self.veo_dur_combo.setCurrentIndex(max(0, self.veo_dur_combo.findData("8")))
         self.veo_res_combo = QtWidgets.QComboBox()
         self.veo_res_combo.setObjectName("paramCombo")
-        self.veo_res_combo.addItem("720P", "720P")
-        self.veo_res_combo.addItem("1080P", "1080P")
-        self.veo_res_combo.addItem("4K", "4K")
+        fill_combo_from_options(self.veo_res_combo, VEO_RESOLUTION_OPTIONS)
         row2.addWidget(self.veo_ratio_combo)
         row2.addWidget(self.veo_dur_combo)
         row2.addWidget(self.veo_res_combo)
         pl.addLayout(row2)
+
 
         # Prompt
         self.veo_prompt_edit = QtWidgets.QTextEdit()
