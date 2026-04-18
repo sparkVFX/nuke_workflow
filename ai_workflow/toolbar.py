@@ -337,16 +337,20 @@ def register_toolbar():
         "ai_workflow.toolbar.create_node_generate_image_nanobanana()",
         icon="Banana.png",
     )
-    ai_menu.addCommand(
-        "Nano Viewer",
+
+    # --- CompMind Nodes Submenu (Viewer nodes) ---
+    compmind_nodes = ai_menu.addMenu("CompMind Nodes", icon="CompMind_Logo.png")
+    compmind_nodes.addCommand(
+        "CM Nano Viewer",
         "ai_workflow.toolbar.create_nano_viewer()",
-        icon="Banana.png",
+        icon="CompMind_Logo.png",
     )
-    ai_menu.addCommand(
-        "Veo Viewer",
+    compmind_nodes.addCommand(
+        "CM VEO Viewer",
         "ai_workflow.toolbar.create_veo_viewer()",
-        icon="VEO.png",
+        icon="CompMind_Logo.png",
     )
+
     ai_menu.addCommand(
         "Media Library",
         "ai_workflow.media_browser.show_media_browser_panel()",
