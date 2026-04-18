@@ -337,25 +337,6 @@ def register_toolbar():
         "ai_workflow.toolbar.create_node_generate_image_nanobanana()",
         icon="Banana.png",
     )
-
-    # --- CompMind Nodes Submenu (Viewer nodes) ---
-    compmind_nodes = ai_menu.addMenu("CompMind Nodes", icon="CompMind_Logo.png")
-    compmind_nodes.addCommand(
-        "CM Nano Viewer",
-        "ai_workflow.toolbar.create_nano_viewer()",
-        icon="CompMind_Logo.png",
-    )
-    compmind_nodes.addCommand(
-        "CM VEO Viewer",
-        "ai_workflow.toolbar.create_veo_viewer()",
-        icon="CompMind_Logo.png",
-    )
-
-    ai_menu.addCommand(
-        "Media Library",
-        "ai_workflow.media_browser.show_media_browser_panel()",
-        icon="Banana.png",
-    )
     ai_menu.addCommand(
         "Generate Video VEO",
         "ai_workflow.toolbar.create_node_generate_video_veo()",
@@ -370,6 +351,24 @@ def register_toolbar():
         "Generate Video Kling",
         "ai_workflow.toolbar.create_node_generate_video_kling()",
         icon="Kling.png",
+    )
+
+    # --- CompMind Nodes Submenu (Viewer nodes) ---
+    compmind_nodes = ai_menu.addMenu("CompMind Nodes", icon="CompMind_Logo.png")
+    compmind_nodes.addCommand(
+        "CM Nano Viewer",
+        "ai_workflow.toolbar.create_nano_viewer()",
+        icon="CompMind_Logo.png",
+    )
+    compmind_nodes.addCommand(
+        "CM VEO Viewer",
+        "ai_workflow.toolbar.create_veo_viewer()",
+        icon="CompMind_Logo.png",
+    )
+    ai_menu.addCommand(
+        "Media Library",
+        "ai_workflow.media_browser.show_media_browser_panel()",
+        icon="Banana.png",
     )
     ai_menu.addCommand(
         "Setting",
