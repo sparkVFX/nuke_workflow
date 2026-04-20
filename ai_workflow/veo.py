@@ -30,12 +30,17 @@ from ai_workflow.core.model_catalog import (
     VEO_DURATION_OPTIONS,
     fill_combo_from_options,
 )
+from ai_workflow.core.video_model_registry import (
+    get_video_adapter,
+    resolve_video_model_id,
+)
 from ai_workflow.core.history_store import (
     get_history,
     set_history,
     push_history_item,
 )
 from ai_workflow.core.settings import (
+
 
 
     AppSettings as NanoBananaSettings,
