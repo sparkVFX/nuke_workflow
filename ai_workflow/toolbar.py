@@ -36,12 +36,9 @@ def create_node_generate_video_veo():
 
 
 def create_node_generate_video_seedance():
-    """Generate Video Seedance - creates a NoOp node as placeholder."""
-    node = nuke.createNode("NoOp")
-    node.setName("GenerateVideo_Seedance")
-    node["label"].setValue("Generate Video\nSeedance")
-    node["tile_color"].setValue(0xFF6347FF)
-    nuke.message("Generate Video Seedance node created.")
+    """Generate Video Seedance - creates a Seedance node with full UI."""
+    import ai_workflow.seedance as sd
+    sd.create_seedance_node()
 
 
 def create_node_generate_video_kling():

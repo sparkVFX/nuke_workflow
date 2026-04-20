@@ -31,6 +31,25 @@ VEO_MODE_OPTIONS = [
     ("Ingredients", "Ingredients"),
 ]
 
+# Seedance (Volcengine Ark API)
+SEEDANCE_MODEL_OPTIONS = [
+    ("Seedance 2.0 (默认)", "doubao-seedance-2-0-260128"),
+    ("Seedance 1.5 Pro", "doubao-seedance-1-5-pro-251215"),
+    ("Seedance 1.0 Pro", "doubao-seedance-1-0-pro-250528"),
+    ("Seedance 1.0 Pro Fast", "doubao-seedance-1-0-pro-fast-251015"),
+]
+SEEDANCE_RATIO_OPTIONS = ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]
+SEEDANCE_DURATION_OPTIONS = [("4", 4), ("5", 5), ("8", 8), ("10", 10), ("15", 15), ("Auto(-1)", -1)]
+SEEDANCE_RESOLUTION_OPTIONS = ["480p", "720p", "1080p"]
+SEEDANCE_MODE_OPTIONS = [
+    ("Text(文本生视频)", "text"),
+    ("Image(首帧图生视频)", "image"),
+    ("Frames(首尾帧图生视频)", "frames"),
+    ("OmniRef(全能参考-多素材)", "omni_reference"),
+    ("VideoExtend(视频延长/续写)", "video_extend"),
+    ("AudioDrive(音频驱动)", "audio_drive"),
+]
+
 # Gemini Chat
 CHAT_MODELS = [
     "gemini-2.5-flash",
