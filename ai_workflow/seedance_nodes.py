@@ -35,8 +35,8 @@ SEEDANCE_MODE_INPUT_COUNTS = {
     SEEDANCE_MODE_TEXT: 0,
     SEEDANCE_MODE_IMAGE: 1,
     SEEDANCE_MODE_FRAMES: 2,
-    # omni_reference: uses dynamic reference panel (no fixed inputs)
-    SEEDANCE_MODE_OMNI_REF: 0,
+    # omni_reference: up to 9 image inputs via Group Input nodes
+    SEEDANCE_MODE_OMNI_REF: 9,
     # video_extend: 1 video input
     SEEDANCE_MODE_VIDEO_EXTEND: 1,
     # audio_drive: 1 audio file input
@@ -123,20 +123,137 @@ def _next_seedance_viewer_name():
     return "SD_Viewer{}".format(i)
 
 
-def _create_seedance_group_inputs(group_node, input_names):
-    """Create Input nodes inside a Seedance Group using NanoBanana/VEO pattern.
+def _rebuild_seedance_omni_inputs(group_node, target_count, preserve_connections=True):
+    """Rebuild a Seedance group's internal Input nodes for omni_reference mode.
 
-    Pattern: REVERSE creation order + 'number' knob.
+    Rebuilds img1..imgN (N = target_count, clamped to [1, 9]). Preserves existing
+    outer connections by logical port (so img1 stays connected to whatever was
+    feeding port N-1-0, etc.) when preserve_connections=True.
+
+    Layout: VEO-style, reverse creation + number knob + xpos=(i-1)*200.
+    External port display order (Nuke sorts by 'number' ascending, rendered
+    right-to-left): number=0 -> rightmost, number=N-1 -> leftmost.
+    Here number = N - i, so label=img1 (i=N) gets number=0 (rightmost visible),
+    label=imgN (i=1) gets number=N-1 (leftmost visible)... wait, that's reversed.
+
+    Convention kept from original: leftmost visible port = img1.
+    """
+    target_count = max(1, min(int(target_count), 9))
+    names = ["img{}".format(i) for i in range(1, target_count + 1)]
+
+    # Save existing outer connections by Input node name (logical).
+    saved = {}
+    group_node.begin()
+    try:
+        existing = [n for n in nuke.allNodes("Input")]
+    finally:
+        group_node.end()
+    old_count = len(existing)
+    if preserve_connections and old_count > 0:
+        # Sort by xpos ascending to match logical order (leftmost = first).
+        ordered = sorted(existing, key=lambda n: int(n["xpos"].value()))
+        for k, inp_node in enumerate(ordered):
+            # Port index = number knob value (which is the outer port this input feeds).
+            if "number" in inp_node.knobs():
+                port = int(inp_node["number"].value())
+            else:
+                port = old_count - 1 - k
+            conn = group_node.input(port) if 0 <= port < old_count else None
+            if conn is not None:
+                saved[inp_node.name()] = conn
+
+    # Delete old Inputs.
+    group_node.begin()
+    try:
+        for inp in list(nuke.allNodes("Input")):
+            nuke.delete(inp)
+        # Create new Inputs: reverse order, VEO style.
+        spacing = 200
+        for i in range(target_count, 0, -1):
+            inp = nuke.nodes.Input()
+            inp.setName(names[i - 1])
+            inp["number"].setValue(target_count - i)
+            inp["xpos"].setValue((i - 1) * spacing)
+            inp["ypos"].setValue(0)
+    finally:
+        group_node.end()
+
+    # Clear all outer inputs first, then restore saved ones.
+    for i in range(max(group_node.inputs(), target_count)):
+        try:
+            group_node.setInput(i, None)
+        except Exception:
+            pass
+    for k, label in enumerate(names):
+        if label in saved:
+            new_port = target_count - 1 - k
+            try:
+                group_node.setInput(new_port, saved[label])
+            except Exception as e:
+                print("[Seedance] restore input '{}' failed: {}".format(label, e))
+
+
+def seedance_on_input_change(group_node):
+    """Called whenever a Seedance Group node's input changes.
+
+    For omni_reference mode: if all existing img ports are now connected,
+    auto-expand by adding one more img port (up to img9). This gives the user
+    a "grow as you connect" workflow rather than showing all 9 ports upfront.
+    """
+    if not group_node or group_node.Class() != "Group":
+        return
+    try:
+        if "sd_s_mode" not in group_node.knobs():
+            return
+        mode_idx = int(group_node["sd_s_mode"].value())
+    except Exception:
+        return
+    # mode_idx 3 == SEEDANCE_MODE_OMNI_REF (see create_seedance_node _MODE_TO_INDEX)
+    if mode_idx != 3:
+        return
+
+    # Count connected vs total ports.
+    total = group_node.inputs()
+    if total <= 0:
+        return
+    connected = sum(1 for i in range(total) if group_node.input(i) is not None)
+
+    # Expand when all current ports are full and we haven't hit the cap of 9.
+    if connected == total and total < 9:
+        new_count = total + 1
+        print("[Seedance] Omni auto-expand: {} -> {} ports (all connected)".format(
+            total, new_count))
+        _rebuild_seedance_omni_inputs(group_node, new_count, preserve_connections=True)
+
+
+def _create_seedance_group_inputs(group_node, input_names):
+    """Create Input nodes inside a Seedance Group using the VEO/NanoBanana pattern.
+
+    Pattern: REVERSE creation order + 'number' knob, fixed spacing=200 (same as VEO).
+    - Nuke: first-created Input = RIGHTmost on the DAG input strip.
+    - Create in REVERSE: rightmost name first (e.g. img9) -> leftmost last (e.g. img1).
+    - 'number' knob: higher value = more LEFT. Leftmost gets highest number.
+    - Connection mapping: names[K] = node.input(count - 1 - K)
+
+    NOTE: Using small xpos spacing (e.g. 40) breaks Nuke's external port ordering
+    on Group nodes — ports fall back to sorting by 'number' knob, which reverses
+    img1..imgN. Always use 200 like VEO.
     """
     count = len(input_names)
+    spacing = 200
     group_node.begin()
     for i in range(count, 0, -1):
         inp = nuke.nodes.Input()
         label = input_names[i - 1]
+        xpos = (i - 1) * spacing
         inp.setName(label)
         inp["number"].setValue(count - i)
-        inp["xpos"].setValue((i - 1) * 200)
+        inp["xpos"].setValue(xpos)
         inp["ypos"].setValue(0)
+        print("[Seedance DEBUG] create input: name={} number={} xpos={}".format(
+            label, count - i, xpos))
+    print("[Seedance DEBUG] create group inputs: count={} spacing={} names={}".format(
+        count, spacing, input_names))
     out = nuke.nodes.Output()
     out["xpos"].setValue(0)
     out["ypos"].setValue(200)
@@ -635,9 +752,11 @@ def create_seedance_node():
         auto_mode = SEEDANCE_MODE_TEXT
     elif node_count == 1:
         auto_mode = SEEDANCE_MODE_IMAGE
-    elif node_count >= 2:
+    elif node_count == 2:
         auto_mode = SEEDANCE_MODE_FRAMES
-        sel = sel[:2]
+    elif node_count >= 3 and node_count <= 9:
+        auto_mode = SEEDANCE_MODE_OMNI_REF
+        sel = sel[:9]
     else:
         auto_mode = SEEDANCE_MODE_TEXT
 
@@ -646,9 +765,18 @@ def create_seedance_node():
         SEEDANCE_MODE_TEXT: [],
         SEEDANCE_MODE_IMAGE: ["FirstFrame"],
         SEEDANCE_MODE_FRAMES: ["FirstFrame", "EndFrame"],
+        SEEDANCE_MODE_OMNI_REF: ["img1", "img2", "img3", "img4", "img5", "img6", "img7", "img8", "img9"],
         SEEDANCE_MODE_VIDEO_EXTEND: ["VideoIn"],
         SEEDANCE_MODE_AUDIO_DRIVE: ["AudioIn"],
     }.get(auto_mode, [])
+
+    # For omni_reference: dynamically expand. Start with (selected_count + 1) img ports,
+    # or just img1 if no nodes selected. Cap at 9.
+    # User connects from leftmost port; each new connection auto-spawns the next img.
+    if auto_mode == SEEDANCE_MODE_OMNI_REF:
+        initial = max(1, min(len(sel) + 1, 9))
+        needed_inputs = initial
+        input_names = input_names[:initial]
 
     ref_node = sel[0] if sel else None
 
@@ -672,7 +800,8 @@ def create_seedance_node():
 
     _create_seedance_group_inputs(group_node, input_names[:needed_inputs])
 
-    # Connect selected nodes
+    # Connect selected nodes (VEO mapping: names[K] = node.input(needed - 1 - K))
+    # input_nodes[0] -> leftmost port (FirstFrame / img1)
     for k, src_node in enumerate(sel[:needed_inputs]):
         port_idx = needed_inputs - 1 - k
         group_node.setInput(port_idx, src_node)
@@ -703,6 +832,10 @@ def create_seedance_node():
     group_node.addKnob(mode_knob)
     group_node["sd_s_mode"].setValue(mode_idx)
 
+    # Omni auto-expand is handled by a global nuke.addKnobChanged callback
+    # (_seedance_input_changed) registered at module import time — see bottom
+    # of this file. No per-node knob script is needed.
+
     mode_display = {
         SEEDANCE_MODE_TEXT: "Text",
         SEEDANCE_MODE_IMAGE: "Image(first frame)",
@@ -715,3 +848,71 @@ def create_seedance_node():
         group_node.name(), mode_display.get(auto_mode, auto_mode), node_count))
 
     return group_node
+
+
+# ---------------------------------------------------------------------------
+# Omni Reference: auto-expand inputs as user connects from leftmost port
+# ---------------------------------------------------------------------------
+_seedance_expanding_inputs = False  # Guard against recursive knobChanged callbacks
+
+
+def _seedance_input_changed():
+    """Global knobChanged callback for Group nodes.
+
+    Fires for every knob change on every Group (including input connection
+    changes, which fire a virtual 'inputChange' knob). We check all Seedance
+    groups in omni_reference mode: if all current ports are connected, expand
+    by one (up to 9).
+
+    NOTE: We don't filter by knob name — NanoBanana's proven pattern does the
+    same. Any knob change is a cheap opportunity to check expansion state.
+    """
+    global _seedance_expanding_inputs
+    if _seedance_expanding_inputs:
+        return
+
+    node = nuke.thisNode()
+    if not node or node.Class() != "Group":
+        return
+
+    # Must be a Seedance generator node in omni_reference mode.
+    name = node.name()
+    if not (name == "Seedance" or re.match(r"^Seedance\d+$", name)):
+        return
+    if "is_seedance_viewer" in node.knobs():
+        return  # Viewer nodes don't auto-expand
+    if "sd_s_mode" not in node.knobs():
+        return
+    try:
+        mode_idx = int(node["sd_s_mode"].value())
+    except Exception:
+        return
+    # mode_idx 3 == SEEDANCE_MODE_OMNI_REF
+    if mode_idx != 3:
+        return
+
+    current = node.inputs()
+    if current <= 0 or current >= 9:
+        return
+
+    # Expand only when ALL current ports have a connection.
+    for i in range(current):
+        if node.input(i) is None:
+            return
+
+    _seedance_expanding_inputs = True
+    try:
+        new_count = current + 1
+        print("[Seedance] Omni auto-expand: {} -> {} ports (all connected)".format(
+            current, new_count))
+        _rebuild_seedance_omni_inputs(node, new_count, preserve_connections=True)
+    finally:
+        _seedance_expanding_inputs = False
+
+
+# Register the callback once, at module import time, scoped to Group class.
+try:
+    nuke.addKnobChanged(_seedance_input_changed, nodeClass="Group")
+    print("[Seedance] Registered global knobChanged callback for omni auto-expand")
+except Exception as _e:
+    print("[Seedance] Failed to register knobChanged callback: {}".format(_e))

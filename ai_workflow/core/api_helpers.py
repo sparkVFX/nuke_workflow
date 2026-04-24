@@ -7,6 +7,8 @@ import sys
 import json
 import base64
 
+from ai_workflow.core.mime_types import guess_mime_type
+
 
 def image_to_base64(image_path):
     """Convert an image file to base64 string."""

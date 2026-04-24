@@ -826,19 +826,33 @@ class SeedanceWidget(QtWidgets.QWidget):
         omni_layout.setSpacing(6)
         omni_layout.setContentsMargins(0, 0, 0, 0)
 
-        omni_title = QtWidgets.QLabel("Omni Reference - Upload up to 9 images / 3 videos / 3 audio")
+        omni_title = QtWidgets.QLabel("Omni Reference - Connect up to 9 image inputs + optional video/audio")
         omni_title.setStyleSheet("color: #ff9800; font-size: 12px; font-weight: bold;")
         omni_layout.addWidget(omni_title)
 
-        # Image references (image1-image9)
-        self._omni_image_edits = []
-        img_grid = QtWidgets.QGridLayout()
-        img_grid.setSpacing(4)
-        for i in range(1, 10):
-            lbl = QtWidgets.QLabel("Img@{}:".format(i))
-            lbl.setStyleSheet("color: #aaa; font-size: 11px;")
+        # Image input hint (images come from Group Input nodes, like VEO Ingredients)
+        img_hint = QtWidgets.QLabel(
+            "Images: Connect upstream Read/Writer nodes to the 9 inputs on the left.\n"
+            "Input1=1(@image1) ... Input9=9(@image9)\n"
+            "Use @image1~@image9 in your prompt to reference each input."
+        )
+        img_hint.setStyleSheet(
+            "color: #4fc3f7; font-size: 11px; background: #1a2332;"
+            " border: 1px dashed #4fc3f7; border-radius: 4px; padding: 6px;"
+        )
+        img_hint.setWordWrap(True)
+        omni_layout.addWidget(img_hint)
+
+        # Video references (video1-video3) - still use file browse (not Input)
+        vid_group = QtWidgets.QWidget()
+        vid_layout = QtWidgets.QHBoxLayout(vid_group)
+        vid_layout.setContentsMargins(0, 2, 0, 0)
+        vid_label = QtWidgets.QLabel("Video refs:")
+        vid_label.setStyleSheet("color: #aaa; font-size: 11px;")
+        self._omni_video_edits = []
+        for i in range(1, 4):
             edit = QtWidgets.QLineEdit()
-            edit.setPlaceholderText("@image{} path or drag-drop".format(i))
+            edit.setPlaceholderText("@video{}".format(i))
             edit.setStyleSheet(
                 "background: #2a2a2a; border: 1px solid #444; border-radius: 3px;"
                 " color: #ddd; padding: 3px 5px; font-size: 11px;"
@@ -847,40 +861,43 @@ class SeedanceWidget(QtWidgets.QWidget):
             btn = QtWidgets.QPushButton("...")
             btn.setFixedWidth(28)
             btn.setObjectName("secondaryBtn")
-            btn.clicked.connect(lambda checked, idx=i: self._browse_omni_file(idx, "image"))
-            row = (i - 1) // 3
-            col = ((i - 1) % 3) * 3
-            img_grid.addWidget(lbl, row, col)
-            img_grid.addWidget(edit, row, col + 1)
-            img_grid.addWidget(btn, row, col + 2)
-            self._omni_image_edits.append(edit)
-        omni_layout.addLayout(img_grid)
+            btn.clicked.connect(lambda checked, idx=i: self._browse_omni_file(idx, "video"))
+            if i > 1:
+                sep = QtWidgets.QLabel(",")
+                sep.setStyleSheet("color: #555;")
+                vid_layout.addWidget(sep)
+            vid_layout.addWidget(edit, 1)
+            vid_layout.addWidget(btn)
+            self._omni_video_edits.append(edit)
+        omni_layout.addWidget(vid_group)
 
-        # Video references (video1-video3) + Audio (audio1-audio3)
-        for prefix, count, label_prefix in [("video", 3, "Video"), ("audio", 3, "Audio")]:
-            h_row = QtWidgets.QHBoxLayout()
-            h_row.setSpacing(6)
-            edits_list = []
-            for i in range(1, count + 1):
-                lbl = QtWidgets.QLabel("{}@{}:".format(label_prefix, i))
-                lbl.setStyleSheet("color: #aaa; font-size: 11px;")
-                edit = QtWidgets.QLineEdit()
-                edit.setPlaceholderText("@{}".format(prefix + str(i)))
-                edit.setStyleSheet(
-                    "background: #2a2a2a; border: 1px solid #444; border-radius: 3px;"
-                    " color: #ddd; padding: 3px 5px; font-size: 11px;"
-                )
-                edit.textChanged.connect(self._save_all_state_to_node)
-                btn = QtWidgets.QPushButton("...")
-                btn.setFixedWidth(28)
-                btn.setObjectName("secondaryBtn")
-                btn.clicked.connect(lambda checked, idx=i, p=prefix: self._browse_omni_file(idx, p))
-                h_row.addWidget(lbl)
-                h_row.addWidget(edit, 1)
-                h_row.addWidget(btn)
-                edits_list.append(edit)
-            omni_layout.addLayout(h_row)
-            setattr(self, "_omni_{}_edits".format(prefix), edits_list)
+        # Audio references (audio1-audio3) - still use file browse
+        aud_group = QtWidgets.QWidget()
+        aud_layout = QtWidgets.QHBoxLayout(aud_group)
+        aud_layout.setContentsMargins(0, 2, 0, 0)
+        aud_label = QtWidgets.QLabel("Audio refs:")
+        aud_label.setStyleSheet("color: #aaa; font-size: 11px;")
+        self._omni_audio_edits = []
+        for i in range(1, 4):
+            edit = QtWidgets.QLineEdit()
+            edit.setPlaceholderText("@audio{}".format(i))
+            edit.setStyleSheet(
+                "background: #2a2a2a; border: 1px solid #444; border-radius: 3px;"
+                " color: #ddd; padding: 3px 5px; font-size: 11px;"
+            )
+            edit.textChanged.connect(self._save_all_state_to_node)
+            btn = QtWidgets.QPushButton("...")
+            btn.setFixedWidth(28)
+            btn.setObjectName("secondaryBtn")
+            btn.clicked.connect(lambda checked, idx=i: self._browse_omni_file(idx, "audio"))
+            if i > 1:
+                sep = QtWidgets.QLabel(",")
+                sep.setStyleSheet("color: #555;")
+                aud_layout.addWidget(sep)
+            aud_layout.addWidget(edit, 1)
+            aud_layout.addWidget(btn)
+            self._omni_audio_edits.append(edit)
+        omni_layout.addWidget(aud_group)
 
         self._omni_container.setVisible(False)
         main.addWidget(self._omni_container)
@@ -960,8 +977,10 @@ class SeedanceWidget(QtWidgets.QWidget):
     # --- Mode switching ---
     def _on_mode_changed(self, index):
         mode = self.mode_combo.currentData() or SEEDANCE_MODE_TEXT
+        print("[Seedance DEBUG] _on_mode_changed: index={} mode={}".format(index, mode))
         self._update_node_inputs(mode)
         self._toggle_mode_panels(mode)
+
 
     def _toggle_mode_panels(self, mode):
         """Show/hide UI panels based on selected mode."""
@@ -974,7 +993,7 @@ class SeedanceWidget(QtWidgets.QWidget):
 
         if mode == SEEDANCE_MODE_OMNI_REF:
             self._mode_info_lbl.setText(
-                "Omni Ref: Upload images/videos/audio. Use @image1, @video1, @audio1 etc. in prompt."
+                "Omni Ref: Connect up to 9 image inputs on node left edge. Use @image1~@image9 in prompt."
             )
         elif mode == SEEDANCE_MODE_VIDEO_EXTEND:
             self._mode_info_lbl.setText(
@@ -1005,11 +1024,8 @@ class SeedanceWidget(QtWidgets.QWidget):
             self._media_path_edit.setText(path)
 
     def _browse_omni_file(self, idx, ref_type):
-        """Browse for an Omni Reference file (image/video/audio)."""
-        if ref_type == "image":
-            caption = "Select Image @{}".format(idx)
-            ffilter = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.tiff);;All Files (*)"
-        elif ref_type == "video":
+        """Browse for an Omni Reference file (video/audio only; images use Input nodes)."""
+        if ref_type == "video":
             caption = "Select Video @{}".format(idx)
             ffilter = "Video Files (*.mp4 *.mov *.avi *.mkv);;All Files (*)"
         else:  # audio
@@ -1018,11 +1034,7 @@ class SeedanceWidget(QtWidgets.QWidget):
 
         path = QtWidgets.QFileDialog.getOpenFileName(self, caption, "", ffilter)[0]
         if path:
-            if ref_type == "image":
-                edits = self._omni_image_edits
-                if 0 < idx <= len(edits):
-                    edits[idx - 1].setText(path)
-            elif ref_type == "video":
+            if ref_type == "video":
                 edits = getattr(self, "_omni_video_edits", [])
                 if 0 < idx <= len(edits):
                     edits[idx - 1].setText(path)
@@ -1046,37 +1058,93 @@ class SeedanceWidget(QtWidgets.QWidget):
             SEEDANCE_MODE_TEXT: [],
             SEEDANCE_MODE_IMAGE: ["FirstFrame"],
             SEEDANCE_MODE_FRAMES: ["FirstFrame", "EndFrame"],
-            SEEDANCE_MODE_OMNI_REF: [],  # uses omni panel, no fixed inputs
+            SEEDANCE_MODE_OMNI_REF: ["img1", "img2", "img3", "img4", "img5", "img6", "img7", "img8", "img9"],
             SEEDANCE_MODE_VIDEO_EXTEND: ["VideoIn"],
             SEEDANCE_MODE_AUDIO_DRIVE: ["AudioIn"],
         }
         names = _INPUT_NAMES.get(mode, [])
 
+        # Omni Reference uses DYNAMIC expansion: don't create all 9 ports upfront
+        # (they're visually cramped and confusing). Instead start with (connected+1)
+        # or 1, and let the global knobChanged callback auto-expand as the user
+        # connects inputs from the left side of the node.
+        is_omni_layout = (mode == SEEDANCE_MODE_OMNI_REF)
+        if is_omni_layout:
+            existing_connected = sum(1 for i in range(node.inputs()) if node.input(i) is not None)
+            needed = max(1, min(existing_connected + 1, 9))
+            names = names[:needed]
+
+        # Use VEO-style fixed spacing=200 for ALL modes. Smaller xpos gaps (e.g.
+        # 40px) confuse Nuke's external port ordering on Group nodes.
+        spacing = 200
+        center_offset = 0  # VEO layout: leftmost at xpos=0, rightmost at (count-1)*spacing
+
+
+        def _debug_dump(stage):
+            try:
+                owner = self._get_owner_node()
+                print("[Seedance DEBUG] {}: mode={} needed={} owner={}".format(
+                    stage, mode, needed, owner.name() if owner else "None"))
+                if owner:
+                    max_inputs = max(owner.inputs(), needed)
+                    for idx in range(max_inputs):
+                        conn = owner.input(idx)
+                        print("[Seedance DEBUG]   outer input({}) <- {}".format(
+                            idx, conn.name() if conn else "None"))
+                for idx, inp_node in enumerate(sorted(nuke.allNodes("Input"), key=lambda n: int(n["xpos"].value()))):
+                    print("[Seedance DEBUG]   inner #{} name={} number={} xpos={}".format(
+                        idx,
+                        inp_node.name(),
+                        int(inp_node["number"].value()) if "number" in inp_node.knobs() else -1,
+                        int(inp_node["xpos"].value())
+                    ))
+            except Exception as dbg_e:
+                print("[Seedance DEBUG] {} dump failed: {}".format(stage, dbg_e))
+
         node.begin()
         existing_inputs = [n for n in nuke.allNodes("Input")]
         current_count = len(existing_inputs)
+        existing_names = [n.name() for n in sorted(existing_inputs, key=lambda n: int(n["xpos"].value()))]
+        need_rebuild = (needed != current_count)
+        if not need_rebuild and needed > 0 and existing_names != names:
+            need_rebuild = True
 
-        if needed != current_count and needed > 0:
+        print("[Seedance DEBUG] _update_node_inputs: mode={} needed={} current={} need_rebuild={} is_omni_layout={} names={} existing_names={}".format(
+            mode, needed, current_count, need_rebuild, is_omni_layout, names, existing_names))
+        _debug_dump("before rebuild")
+
+        if need_rebuild and needed > 0:
             saved = {}
             if current_count > 0:
                 old_names = sorted(existing_inputs, key=lambda n: int(n["xpos"].value()))
                 for k, inp_node in enumerate(old_names):
-                    old_port = current_count - 1 - k
+                    if "number" in inp_node.knobs():
+                        old_port = int(inp_node["number"].value())
+                    else:
+                        old_port = current_count - 1 - k
                     conn = node.input(old_port) if 0 <= old_port < current_count else None
                     if conn is not None:
-                        saved[inp_node.name()] = conn
+                        logical_name = inp_node.name()
+                        saved[logical_name] = conn
+                        print("[Seedance DEBUG]   save {} <- {} (old_port={})".format(
+                            logical_name, conn.name(), old_port))
 
-            del_names = [n.name() for n in existing_inputs]
             for inp in list(nuke.allNodes("Input")):
+                print("[Seedance DEBUG]   delete inner input {}".format(inp.name()))
                 nuke.delete(inp)
 
+            # VEO-style rebuild: reverse creation order + number knob + xpos=(i-1)*200.
+            # This is IDENTICAL to VEO Ingredients, which is the proven correct layout.
             for i in range(needed, 0, -1):
                 inp = nuke.nodes.Input()
                 label = names[i - 1]
+                xpos = int(round((i - 1) * spacing - center_offset))
                 inp.setName(label)
                 inp["number"].setValue(needed - i)
-                inp["xpos"].setValue((i - 1) * 200)
+                inp["xpos"].setValue(xpos)
                 inp["ypos"].setValue(0)
+                print("[Seedance DEBUG]   create {} number={} xpos={}".format(
+                    label, needed - i, xpos))
             node.end()
 
             set_indices = set()
@@ -1087,21 +1155,32 @@ class SeedanceWidget(QtWidgets.QWidget):
                     if group_ref:
                         group_ref.setInput(new_port, saved[label])
                         set_indices.add(new_port)
+                        print("[Seedance DEBUG]   restore {} -> input({}) from {}".format(
+                            label, new_port, saved[label].name()))
 
             for i in range(needed):
                 if i not in set_indices:
                     group_ref = self._get_owner_node()
                     if group_ref:
                         group_ref.setInput(i, None)
+                        print("[Seedance DEBUG]   clear input({})".format(i))
+
+            node.begin()
+            _debug_dump("after rebuild")
+            node.end()
             return
 
         elif needed == 0 and current_count > 0:
             for inp in list(nuke.allNodes("Input")):
+                print("[Seedance DEBUG]   delete inner input {}".format(inp.name()))
                 nuke.delete(inp)
+            _debug_dump("after clear")
             node.end()
             return
 
+        _debug_dump("no rebuild")
         node.end()
+
 
     # --- History ---
     def _on_history_select(self, index):
@@ -1182,7 +1261,6 @@ class SeedanceWidget(QtWidgets.QWidget):
             self._ensure_text_knob(node, "sd_s_prompt", "s_prompt")
             self._ensure_text_knob(node, "sd_s_neg", "s_neg")
             self._ensure_text_knob(node, "sd_s_stdfields", "s_stdfields")
-            self._ensure_text_knob(node, "sd_s_omni_images", "s_omni_images")
             self._ensure_text_knob(node, "sd_s_omni_videos", "s_omni_videos")
             self._ensure_text_knob(node, "sd_s_omni_audio", "s_omni_audio")
             self._ensure_text_knob(node, "sd_s_media_path", "s_media_path")
@@ -1201,9 +1279,7 @@ class SeedanceWidget(QtWidgets.QWidget):
             )
             node["sd_s_stdfields"].setValue(std_vals)
 
-            # Save omni reference paths
-            omni_img_vals = "|".join(e.text() for e in self._omni_image_edits)
-            node["sd_s_omni_images"].setValue(omni_img_vals)
+            # Save omni video/audio paths (images come from Input nodes, no need to save)
             if hasattr(self, "_omni_video_edits"):
                 omni_vid_vals = "|".join(e.text() for e in self._omni_video_edits)
                 node["sd_s_omni_videos"].setValue(omni_vid_vals)
@@ -1256,6 +1332,7 @@ class SeedanceWidget(QtWidgets.QWidget):
                     self.dur_combo.setCurrentIndex(idx)
             if "sd_s_mode" in node.knobs():
                 idx = int(node["sd_s_mode"].value())
+                print("[Seedance DEBUG] restore mode index={}".format(idx))
                 if 0 <= idx < self.mode_combo.count():
                     self.mode_combo.setCurrentIndex(idx)
             if "sd_s_pm" in node.knobs():
@@ -1278,14 +1355,7 @@ class SeedanceWidget(QtWidgets.QWidget):
                         if i < len(vals):
                             self._std_field_widgets[key].setText(vals[i])
 
-            # Restore Omni Reference paths
-            if "sd_s_omni_images" in node.knobs():
-                raw = node["sd_s_omni_images"].value()
-                if raw:
-                    vals = raw.split("|")
-                    for i, edit in enumerate(self._omni_image_edits):
-                        if i < len(vals) and vals[i]:
-                            edit.setText(vals[i])
+            # Restore Omni Reference video/audio paths (images from Input nodes)
             if "sd_s_omni_videos" in node.knobs() and hasattr(self, "_omni_video_edits"):
                 raw = node["sd_s_omni_videos"].value()
                 if raw:
@@ -1413,14 +1483,26 @@ class SeedanceWidget(QtWidgets.QWidget):
             SEEDANCE_MODE_TEXT: [],
             SEEDANCE_MODE_IMAGE: ["FirstFrame"],
             SEEDANCE_MODE_FRAMES: ["FirstFrame", "EndFrame"],
-            SEEDANCE_MODE_OMNI_REF: [],
+            SEEDANCE_MODE_OMNI_REF: ["img1", "img2", "img3", "img4", "img5", "img6", "img7", "img8", "img9"],
             SEEDANCE_MODE_VIDEO_EXTEND: ["VideoIn"],
             SEEDANCE_MODE_AUDIO_DRIVE: ["AudioIn"],
         }
         names = _INPUT_NAMES.get(current_mode, [])
 
-        for k in range(input_count):
-            port_idx = input_count - 1 - k
+        # For omni_reference: use the node's ACTUAL port count (dynamically grown)
+        # rather than the theoretical max of 9. This matches how many img ports
+        # the user currently sees and may have connected.
+        if current_mode == SEEDANCE_MODE_OMNI_REF:
+            input_count = node.inputs()
+            names = names[:input_count]
+
+        # Collect image inputs from node Input ports (like VEO Ingredients)
+        # For omni_reference, collect all connected image inputs as references
+        omni_image_count = input_count if current_mode == SEEDANCE_MODE_OMNI_REF else input_count
+        effective_count = min(input_count, len(names)) if names else 0
+
+        for k in range(effective_count):
+            port_idx = effective_count - 1 - k
             label = names[k] if k < len(names) else "input{}".format(k + 1)
             inp_ref = node.input(port_idx)
             if inp_ref:
@@ -1442,10 +1524,10 @@ class SeedanceWidget(QtWidgets.QWidget):
         # Collect Omni Reference paths
         omni_references = {}
         if current_mode == SEEDANCE_MODE_OMNI_REF:
-            for i, edit in enumerate(self._omni_image_edits, 1):
-                p = edit.text().strip()
-                if p and os.path.exists(p):
-                    omni_references["image{}".format(i)] = p
+            # Images come from Input ports (already rendered into reference_image_paths)
+            for i, img_path in enumerate(reference_image_paths, 1):
+                omni_references["image{}".format(i)] = img_path
+            # Video/audio from file browse fields
             for i, edit in enumerate(getattr(self, "_omni_video_edits", []), 1):
                 p = edit.text().strip()
                 if p and os.path.exists(p):
