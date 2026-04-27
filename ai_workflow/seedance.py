@@ -901,6 +901,7 @@ class SeedanceWidget(QtWidgets.QWidget):
         vid_layout.setContentsMargins(0, 2, 0, 0)
         vid_label = QtWidgets.QLabel("Video refs:")
         vid_label.setStyleSheet("color: #aaa; font-size: 11px;")
+        vid_layout.addWidget(vid_label)
         self._omni_video_edits = []
         for i in range(1, 4):
             edit = QtWidgets.QLineEdit()
@@ -913,7 +914,13 @@ class SeedanceWidget(QtWidgets.QWidget):
             btn = QtWidgets.QPushButton("...")
             btn.setFixedWidth(28)
             btn.setObjectName("secondaryBtn")
-            btn.clicked.connect(lambda checked, idx=i: self._browse_omni_file(idx, "video"))
+            btn.setToolTip("Browse for video file (@video{})".format(i))
+            # Use *args so the handler is tolerant of any signal signature
+            # (Qt's clicked may emit with or without a bool depending on
+            # bindings / checkable state).
+            btn.clicked.connect(
+                lambda *args, idx=i: self._browse_omni_file(idx, "video")
+            )
             if i > 1:
                 sep = QtWidgets.QLabel(",")
                 sep.setStyleSheet("color: #555;")
@@ -929,6 +936,7 @@ class SeedanceWidget(QtWidgets.QWidget):
         aud_layout.setContentsMargins(0, 2, 0, 0)
         aud_label = QtWidgets.QLabel("Audio refs:")
         aud_label.setStyleSheet("color: #aaa; font-size: 11px;")
+        aud_layout.addWidget(aud_label)
         self._omni_audio_edits = []
         for i in range(1, 4):
             edit = QtWidgets.QLineEdit()
@@ -941,7 +949,10 @@ class SeedanceWidget(QtWidgets.QWidget):
             btn = QtWidgets.QPushButton("...")
             btn.setFixedWidth(28)
             btn.setObjectName("secondaryBtn")
-            btn.clicked.connect(lambda checked, idx=i: self._browse_omni_file(idx, "audio"))
+            btn.setToolTip("Browse for audio file (@audio{})".format(i))
+            btn.clicked.connect(
+                lambda *args, idx=i: self._browse_omni_file(idx, "audio")
+            )
             if i > 1:
                 sep = QtWidgets.QLabel(",")
                 sep.setStyleSheet("color: #555;")
@@ -1157,6 +1168,7 @@ class SeedanceWidget(QtWidgets.QWidget):
 
     def _browse_media_path(self):
         """Browse for video/audio file."""
+        print("[Seedance] _browse_media_path clicked")
         mode = self._get_current_mode()
         if mode == SEEDANCE_MODE_VIDEO_EXTEND:
             caption = "Select Video File"
@@ -1168,12 +1180,24 @@ class SeedanceWidget(QtWidgets.QWidget):
             caption = "Select Media File"
             ffilter = "All Files (*)"
 
-        path = QtWidgets.QFileDialog.getOpenFileName(self, caption, "", ffilter)[0]
+        try:
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self, caption, "", ffilter
+            )
+        except Exception as e:
+            print("[Seedance] QFileDialog failed: {}".format(e))
+            # Fallback to Nuke's native file picker if Qt dialog misbehaves.
+            try:
+                path = nuke.getFilename(caption) or ""
+            except Exception as e2:
+                print("[Seedance] nuke.getFilename also failed: {}".format(e2))
+                return
         if path:
             self._media_path_edit.setText(path)
 
     def _browse_omni_file(self, idx, ref_type):
         """Browse for an Omni Reference file (video/audio only; images use Input nodes)."""
+        print("[Seedance] _browse_omni_file clicked: idx={} type={}".format(idx, ref_type))
         if ref_type == "video":
             caption = "Select Video @{}".format(idx)
             ffilter = "Video Files (*.mp4 *.mov *.avi *.mkv);;All Files (*)"
@@ -1181,16 +1205,32 @@ class SeedanceWidget(QtWidgets.QWidget):
             caption = "Select Audio @{}".format(idx)
             ffilter = "Audio Files (*.wav *.mp3 *.aac *.m4a *.flac);;All Files (*)"
 
-        path = QtWidgets.QFileDialog.getOpenFileName(self, caption, "", ffilter)[0]
-        if path:
-            if ref_type == "video":
-                edits = getattr(self, "_omni_video_edits", [])
-                if 0 < idx <= len(edits):
-                    edits[idx - 1].setText(path)
-            elif ref_type == "audio":
-                edits = getattr(self, "_omni_audio_edits", [])
-                if 0 < idx <= len(edits):
-                    edits[idx - 1].setText(path)
+        try:
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self, caption, "", ffilter
+            )
+        except Exception as e:
+            print("[Seedance] QFileDialog failed: {}".format(e))
+            # Fallback to Nuke's native picker — it never fails inside Nuke.
+            try:
+                path = nuke.getFilename(caption) or ""
+            except Exception as e2:
+                print("[Seedance] nuke.getFilename also failed: {}".format(e2))
+                return
+
+        if not path:
+            print("[Seedance] user cancelled file dialog")
+            return
+        if ref_type == "video":
+            edits = getattr(self, "_omni_video_edits", [])
+            if 0 < idx <= len(edits):
+                edits[idx - 1].setText(path)
+                print("[Seedance] set @video{} = {}".format(idx, path))
+        elif ref_type == "audio":
+            edits = getattr(self, "_omni_audio_edits", [])
+            if 0 < idx <= len(edits):
+                edits[idx - 1].setText(path)
+                print("[Seedance] set @audio{} = {}".format(idx, path))
 
     def _get_current_mode(self):
         return self.mode_combo.currentData() or SEEDANCE_MODE_TEXT
@@ -1237,10 +1277,15 @@ class SeedanceWidget(QtWidgets.QWidget):
                 needed = len([n for n in inner_inputs if re.match(r"^img\d+$", n.name())])
                 needed = max(1, min(needed, 9))
             else:
+                # Entering omni from a DIFFERENT mode (text / image / frames / ...).
+                # Preferred UX: one port per existing live connection (so img1
+                # inherits the previous FirstFrame, img2 inherits EndFrame, etc.)
+                # — and NOT one extra empty port. The user explicitly adds more
+                # via "+ Add". Fall back to 1 when nothing is connected yet.
                 existing_connected = sum(
                     1 for i in range(node.inputs()) if node.input(i) is not None
                 )
-                needed = max(1, min(existing_connected + 1, 9))
+                needed = max(1, min(existing_connected, 9)) if existing_connected > 0 else 1
             names = names[:needed]
 
         # Use VEO-style fixed spacing=200 for ALL modes. Smaller xpos gaps (e.g.
@@ -1284,6 +1329,12 @@ class SeedanceWidget(QtWidgets.QWidget):
 
         if need_rebuild and needed > 0:
             saved = {}
+            # When switching INTO omni layout from another mode (image/frames/...),
+            # the old label names (FirstFrame, EndFrame, ...) won't match the new
+            # img1/img2/... labels, so a label-based saved/restore drops every
+            # connection. Track outer-port -> upstream separately so we can
+            # remap by logical position (leftmost old conn -> img1, etc.).
+            saved_by_old_port = {}
             if current_count > 0:
                 old_names = sorted(existing_inputs, key=lambda n: int(n["xpos"].value()))
                 for k, inp_node in enumerate(old_names):
@@ -1295,12 +1346,31 @@ class SeedanceWidget(QtWidgets.QWidget):
                     if conn is not None:
                         logical_name = inp_node.name()
                         saved[logical_name] = conn
-                        print("[Seedance DEBUG]   save {} <- {} (old_port={})".format(
-                            logical_name, conn.name(), old_port))
+                        # xpos-order index 0 == leftmost inner Input == img1 slot
+                        # after the rebuild, so we key by that logical position.
+                        saved_by_old_port[k] = conn
+                        print("[Seedance DEBUG]   save {} <- {} (old_port={} logical_idx={})".format(
+                            logical_name, conn.name(), old_port, k))
 
             for inp in list(nuke.allNodes("Input")):
                 print("[Seedance DEBUG]   delete inner input {}".format(inp.name()))
                 nuke.delete(inp)
+
+            # Detach every external connection BEFORE leaving begin()/creating
+            # new Inputs. If we don't, Nuke keeps a "ghost" port on the node's
+            # outer input strip that survives the Input-node rebuild and shows
+            # up as an unlabeled stub arrow in the DAG (same root cause as the
+            # bug fixed in _rebuild_seedance_omni_inputs).
+            node.end()
+            try:
+                prior_outer = int(node.inputs())
+                for i in range(prior_outer):
+                    try:
+                        node.setInput(i, None)
+                    except Exception:
+                        pass
+            finally:
+                node.begin()
 
             # VEO-style rebuild: reverse creation order + number knob + xpos=(i-1)*200.
             # This is IDENTICAL to VEO Ingredients, which is the proven correct layout.
@@ -1317,6 +1387,7 @@ class SeedanceWidget(QtWidgets.QWidget):
             node.end()
 
             set_indices = set()
+            # First pass: same-label restore (omni->omni, image->image, ...).
             for k, label in enumerate(names):
                 if label in saved:
                     new_port = needed - 1 - k
@@ -1324,8 +1395,25 @@ class SeedanceWidget(QtWidgets.QWidget):
                     if group_ref:
                         group_ref.setInput(new_port, saved[label])
                         set_indices.add(new_port)
-                        print("[Seedance DEBUG]   restore {} -> input({}) from {}".format(
+                        print("[Seedance DEBUG]   restore {} -> input({}) from {} (by label)".format(
                             label, new_port, saved[label].name()))
+
+            # Second pass: cross-mode positional remap. For any new label (img1,
+            # img2, ...) whose name wasn't in `saved`, fall back to the old
+            # connection at the same logical (leftmost-first) index. This is
+            # what makes "Image mode FirstFrame -> img1" when switching into
+            # Omni Reference.
+            for k, label in enumerate(names):
+                new_port = needed - 1 - k
+                if new_port in set_indices:
+                    continue
+                if k in saved_by_old_port:
+                    group_ref = self._get_owner_node()
+                    if group_ref:
+                        group_ref.setInput(new_port, saved_by_old_port[k])
+                        set_indices.add(new_port)
+                        print("[Seedance DEBUG]   restore {} -> input({}) from {} (by position, cross-mode)".format(
+                            label, new_port, saved_by_old_port[k].name()))
 
             for i in range(needed):
                 if i not in set_indices:
