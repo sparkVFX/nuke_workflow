@@ -99,6 +99,7 @@ import datetime
 import re
 import base64
 import subprocess
+import sys
 
 # HTTP requests for Ark API
 try:
@@ -911,6 +912,8 @@ class SeedanceWidget(QtWidgets.QWidget):
                 " color: #ddd; padding: 3px 5px; font-size: 11px;"
             )
             edit.textChanged.connect(self._save_all_state_to_node)
+            # Refresh preview rows whenever the path changes.
+            edit.textChanged.connect(self._refresh_omni_previews)
             btn = QtWidgets.QPushButton("...")
             btn.setFixedWidth(28)
             btn.setObjectName("secondaryBtn")
@@ -930,6 +933,18 @@ class SeedanceWidget(QtWidgets.QWidget):
             self._omni_video_edits.append(edit)
         omni_layout.addWidget(vid_group)
 
+        # Preview list for video refs (shown only for non-empty paths).
+        self._omni_video_preview_container = QtWidgets.QWidget()
+        vpl = QtWidgets.QVBoxLayout(self._omni_video_preview_container)
+        vpl.setContentsMargins(14, 0, 0, 2)
+        vpl.setSpacing(2)
+        self._omni_video_preview_rows = []
+        for i in range(1, 4):
+            row = self._build_omni_preview_row(idx=i, ref_type="video")
+            vpl.addWidget(row["widget"])
+            self._omni_video_preview_rows.append(row)
+        omni_layout.addWidget(self._omni_video_preview_container)
+
         # Audio references (audio1-audio3) - still use file browse
         aud_group = QtWidgets.QWidget()
         aud_layout = QtWidgets.QHBoxLayout(aud_group)
@@ -946,6 +961,7 @@ class SeedanceWidget(QtWidgets.QWidget):
                 " color: #ddd; padding: 3px 5px; font-size: 11px;"
             )
             edit.textChanged.connect(self._save_all_state_to_node)
+            edit.textChanged.connect(self._refresh_omni_previews)
             btn = QtWidgets.QPushButton("...")
             btn.setFixedWidth(28)
             btn.setObjectName("secondaryBtn")
@@ -961,6 +977,21 @@ class SeedanceWidget(QtWidgets.QWidget):
             aud_layout.addWidget(btn)
             self._omni_audio_edits.append(edit)
         omni_layout.addWidget(aud_group)
+
+        # Preview list for audio refs (shown only for non-empty paths).
+        self._omni_audio_preview_container = QtWidgets.QWidget()
+        apl = QtWidgets.QVBoxLayout(self._omni_audio_preview_container)
+        apl.setContentsMargins(14, 0, 0, 2)
+        apl.setSpacing(2)
+        self._omni_audio_preview_rows = []
+        for i in range(1, 4):
+            row = self._build_omni_preview_row(idx=i, ref_type="audio")
+            apl.addWidget(row["widget"])
+            self._omni_audio_preview_rows.append(row)
+        omni_layout.addWidget(self._omni_audio_preview_container)
+
+        # Prime the preview rows (all empty initially -> all hidden).
+        self._refresh_omni_previews()
 
         self._omni_container.setVisible(False)
         main.addWidget(self._omni_container)
@@ -1231,6 +1262,143 @@ class SeedanceWidget(QtWidgets.QWidget):
             if 0 < idx <= len(edits):
                 edits[idx - 1].setText(path)
                 print("[Seedance] set @audio{} = {}".format(idx, path))
+
+    # ------------------------------------------------------------------ #
+    # Omni reference preview rows                                         #
+    # ------------------------------------------------------------------ #
+    def _build_omni_preview_row(self, idx, ref_type):
+        """Build one preview row: [icon] name [Open] [X]. Hidden when empty."""
+        icon = "V" if ref_type == "video" else "A"
+        w = QtWidgets.QWidget()
+        hl = QtWidgets.QHBoxLayout(w)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.setSpacing(6)
+
+        tag = QtWidgets.QLabel("[{} @{}{}]".format(icon, ref_type, idx))
+        tag.setStyleSheet(
+            "color: #888; font-size: 10px; font-family: Consolas,monospace;"
+        )
+
+        name_lbl = QtWidgets.QLabel("")
+        name_lbl.setStyleSheet("color: #cfd8dc; font-size: 11px;")
+        name_lbl.setTextInteractionFlags(
+            QtCore.Qt.TextSelectableByMouse
+        )
+        name_lbl.setToolTip("")
+        # Elide long names so the row never overflows.
+        try:
+            name_lbl.setSizePolicy(
+                QtWidgets.QSizePolicy.Ignored,
+                QtWidgets.QSizePolicy.Preferred,
+            )
+        except Exception:
+            pass
+
+        open_btn = QtWidgets.QPushButton("Open")
+        open_btn.setFixedHeight(20)
+        open_btn.setObjectName("secondaryBtn")
+        open_btn.setToolTip("Open this file with the system's default app")
+        open_btn.clicked.connect(
+            lambda *args, i=idx, t=ref_type: self._open_omni_ref(i, t)
+        )
+
+        clear_btn = QtWidgets.QPushButton("x")
+        clear_btn.setFixedSize(20, 20)
+        clear_btn.setObjectName("secondaryBtn")
+        clear_btn.setToolTip("Remove this reference")
+        clear_btn.clicked.connect(
+            lambda *args, i=idx, t=ref_type: self._clear_omni_ref(i, t)
+        )
+
+        hl.addWidget(tag)
+        hl.addWidget(name_lbl, 1)
+        hl.addWidget(open_btn)
+        hl.addWidget(clear_btn)
+        w.setVisible(False)
+        return {"widget": w, "name": name_lbl, "open": open_btn}
+
+    def _refresh_omni_previews(self, *_args):
+        """Sync preview rows with the current @video/@audio edit paths."""
+        def _apply(edits, rows):
+            for i, edit in enumerate(edits):
+                if i >= len(rows):
+                    break
+                row = rows[i]
+                path = (edit.text() or "").strip()
+                if not path:
+                    row["widget"].setVisible(False)
+                    row["name"].setText("")
+                    row["name"].setToolTip("")
+                    continue
+                base = os.path.basename(path) or path
+                exists = os.path.exists(path)
+                color = "#cfd8dc" if exists else "#e57373"
+                suffix = "" if exists else "  (missing)"
+                row["name"].setStyleSheet(
+                    "color: {}; font-size: 11px;".format(color)
+                )
+                row["name"].setText(base + suffix)
+                row["name"].setToolTip(path)
+                row["open"].setEnabled(exists)
+                row["widget"].setVisible(True)
+
+        _apply(
+            getattr(self, "_omni_video_edits", []),
+            getattr(self, "_omni_video_preview_rows", []),
+        )
+        _apply(
+            getattr(self, "_omni_audio_edits", []),
+            getattr(self, "_omni_audio_preview_rows", []),
+        )
+
+    def _open_omni_ref(self, idx, ref_type):
+        """Open the referenced file with the OS default application."""
+        edits = (
+            getattr(self, "_omni_video_edits", [])
+            if ref_type == "video"
+            else getattr(self, "_omni_audio_edits", [])
+        )
+        if not (0 < idx <= len(edits)):
+            return
+        path = (edits[idx - 1].text() or "").strip()
+        if not path:
+            return
+        if not os.path.exists(path):
+            print("[Seedance] file not found: {}".format(path))
+            nuke.message("File not found:\n{}".format(path))
+            return
+        self._open_path_externally(path)
+
+    def _clear_omni_ref(self, idx, ref_type):
+        """Clear a given @video/@audio slot."""
+        edits = (
+            getattr(self, "_omni_video_edits", [])
+            if ref_type == "video"
+            else getattr(self, "_omni_audio_edits", [])
+        )
+        if 0 < idx <= len(edits):
+            edits[idx - 1].setText("")
+
+    def _open_path_externally(self, path):
+        """Open *path* using the platform's default handler."""
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+            print("[Seedance] opened {}".format(path))
+        except Exception as e:
+            print("[Seedance] open failed: {}".format(e))
+            # Last-ditch fallback via Qt (works when a desktop service is registered).
+            try:
+                from PySide2.QtCore import QUrl
+                from PySide2.QtGui import QDesktopServices
+                QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+            except Exception as e2:
+                print("[Seedance] QDesktopServices fallback failed: {}".format(e2))
+                nuke.message("Could not open file:\n{}".format(path))
 
     def _get_current_mode(self):
         return self.mode_combo.currentData() or SEEDANCE_MODE_TEXT
