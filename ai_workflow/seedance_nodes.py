@@ -141,7 +141,7 @@ def _rebuild_seedance_omni_inputs(group_node, target_count, preserve_connections
     target_count = max(1, min(int(target_count), 9))
     names = ["img{}".format(i) for i in range(1, target_count + 1)]
 
-    # Save existing outer connections by Input node name (logical).
+    # --- Phase 1: snapshot existing Input nodes + their external connections ---
     saved = {}
     group_node.begin()
     try:
@@ -150,10 +150,10 @@ def _rebuild_seedance_omni_inputs(group_node, target_count, preserve_connections
         group_node.end()
     old_count = len(existing)
     if preserve_connections and old_count > 0:
-        # Sort by xpos ascending to match logical order (leftmost = first).
+        # Sort by xpos ascending to match logical order (leftmost = first => img1).
         ordered = sorted(existing, key=lambda n: int(n["xpos"].value()))
         for k, inp_node in enumerate(ordered):
-            # Port index = number knob value (which is the outer port this input feeds).
+            # Port index = number knob value (the outer port this Input feeds).
             if "number" in inp_node.knobs():
                 port = int(inp_node["number"].value())
             else:
@@ -162,12 +162,29 @@ def _rebuild_seedance_omni_inputs(group_node, target_count, preserve_connections
             if conn is not None:
                 saved[inp_node.name()] = conn
 
-    # Delete old Inputs.
+    # --- Phase 2: detach ALL external connections BEFORE mutating Inputs ---
+    # This is critical: if we delete Input nodes while the outer group still
+    # has live connections on those ports, Nuke may retain ghost ports that
+    # keep node.inputs() above the new Input count and leave an unlabeled
+    # stub arrow on the DAG (the exact symptom of this bug).
+    prior_outer = int(group_node.inputs())
+    for i in range(prior_outer):
+        try:
+            group_node.setInput(i, None)
+        except Exception:
+            pass
+
+    # --- Phase 3: delete all old Inputs, then create the new set ---
     group_node.begin()
     try:
         for inp in list(nuke.allNodes("Input")):
             nuke.delete(inp)
-        # Create new Inputs: reverse order, VEO style.
+    finally:
+        group_node.end()
+
+    group_node.begin()
+    try:
+        # Reverse creation order, VEO style: rightmost (imgN, number=0) first.
         spacing = 200
         for i in range(target_count, 0, -1):
             inp = nuke.nodes.Input()
@@ -178,12 +195,19 @@ def _rebuild_seedance_omni_inputs(group_node, target_count, preserve_connections
     finally:
         group_node.end()
 
-    # Clear all outer inputs first, then restore saved ones.
-    for i in range(max(group_node.inputs(), target_count)):
-        try:
-            group_node.setInput(i, None)
-        except Exception:
-            pass
+    # --- Phase 4: nudge Nuke to recompute outer port count ---
+    # Without any external trigger Nuke sometimes keeps the old port count
+    # cached. Toggling selection is the cheapest known way to force a refresh
+    # of the node's input strip / DAG representation.
+    try:
+        was_selected = group_node.isSelected()
+        group_node.setSelected(not was_selected)
+        group_node.setSelected(was_selected)
+    except Exception:
+        pass
+
+    # --- Phase 5: restore saved connections by logical label ---
+    # names[K] (img(K+1)) is always bound to outer port (target_count - 1 - K).
     for k, label in enumerate(names):
         if label in saved:
             new_port = target_count - 1 - k
@@ -192,38 +216,12 @@ def _rebuild_seedance_omni_inputs(group_node, target_count, preserve_connections
             except Exception as e:
                 print("[Seedance] restore input '{}' failed: {}".format(label, e))
 
-
-def seedance_on_input_change(group_node):
-    """Called whenever a Seedance Group node's input changes.
-
-    For omni_reference mode: if all existing img ports are now connected,
-    auto-expand by adding one more img port (up to img9). This gives the user
-    a "grow as you connect" workflow rather than showing all 9 ports upfront.
-    """
-    if not group_node or group_node.Class() != "Group":
-        return
-    try:
-        if "sd_s_mode" not in group_node.knobs():
-            return
-        mode_idx = int(group_node["sd_s_mode"].value())
-    except Exception:
-        return
-    # mode_idx 3 == SEEDANCE_MODE_OMNI_REF (see create_seedance_node _MODE_TO_INDEX)
-    if mode_idx != 3:
-        return
-
-    # Count connected vs total ports.
-    total = group_node.inputs()
-    if total <= 0:
-        return
-    connected = sum(1 for i in range(total) if group_node.input(i) is not None)
-
-    # Expand when all current ports are full and we haven't hit the cap of 9.
-    if connected == total and total < 9:
-        new_count = total + 1
-        print("[Seedance] Omni auto-expand: {} -> {} ports (all connected)".format(
-            total, new_count))
-        _rebuild_seedance_omni_inputs(group_node, new_count, preserve_connections=True)
+    # --- Phase 6: sanity check — warn loudly if Nuke still reports a mismatch ---
+    final_outer = int(group_node.inputs())
+    if final_outer != target_count:
+        print("[Seedance][WARN] rebuild mismatch: inputs()={} target={} "
+              "(there may be a ghost port; try toggling the panel).".format(
+                  final_outer, target_count))
 
 
 def _create_seedance_group_inputs(group_node, input_names):
@@ -770,9 +768,9 @@ def create_seedance_node():
         SEEDANCE_MODE_AUDIO_DRIVE: ["AudioIn"],
     }.get(auto_mode, [])
 
-    # For omni_reference: dynamically expand. Start with (selected_count + 1) img ports,
-    # or just img1 if no nodes selected. Cap at 9.
-    # User connects from leftmost port; each new connection auto-spawns the next img.
+    # For omni_reference: start with (selected_count + 1) img ports, or just img1
+    # if no nodes selected. Cap at 9. Ports can later be added / removed manually
+    # via the "+ Add" / "- Remove" buttons in the Seedance panel.
     if auto_mode == SEEDANCE_MODE_OMNI_REF:
         initial = max(1, min(len(sel) + 1, 9))
         needed_inputs = initial
@@ -832,9 +830,8 @@ def create_seedance_node():
     group_node.addKnob(mode_knob)
     group_node["sd_s_mode"].setValue(mode_idx)
 
-    # Omni auto-expand is handled by a global nuke.addKnobChanged callback
-    # (_seedance_input_changed) registered at module import time — see bottom
-    # of this file. No per-node knob script is needed.
+    # Omni Reference port count is managed MANUALLY via the "+ Add" / "- Remove"
+    # buttons in the Seedance panel (see seedance.py). No auto-expand callbacks.
 
     mode_display = {
         SEEDANCE_MODE_TEXT: "Text",
@@ -851,68 +848,64 @@ def create_seedance_node():
 
 
 # ---------------------------------------------------------------------------
-# Omni Reference: auto-expand inputs as user connects from leftmost port
+# Omni Reference: manual +/- port management (triggered by panel buttons)
 # ---------------------------------------------------------------------------
-_seedance_expanding_inputs = False  # Guard against recursive knobChanged callbacks
+# NOTE: We intentionally do NOT auto-expand on connection. The user drives port
+# count via the "+ Add" / "- Remove" buttons in the Seedance panel
+# (see seedance.py:_on_omni_add_input / _on_omni_remove_input), which delegate
+# to _rebuild_seedance_omni_inputs() above.
+#
+# Rationale: auto-expand caused the node to grow wider as the user connected
+# inputs, and 9 cramped ports were hard to target. Manual +/- gives explicit
+# control and keeps the node size predictable.
 
 
-def _seedance_input_changed():
-    """Global knobChanged callback for Group nodes.
+def seedance_omni_add_input(group_node):
+    """Add one more img input port to a Seedance omni_reference group (cap 9).
 
-    Fires for every knob change on every Group (including input connection
-    changes, which fire a virtual 'inputChange' knob). We check all Seedance
-    groups in omni_reference mode: if all current ports are connected, expand
-    by one (up to 9).
-
-    NOTE: We don't filter by knob name — NanoBanana's proven pattern does the
-    same. Any knob change is a cheap opportunity to check expansion state.
+    Returns the new port count, or None if the operation was skipped.
     """
-    global _seedance_expanding_inputs
-    if _seedance_expanding_inputs:
-        return
-
-    node = nuke.thisNode()
-    if not node or node.Class() != "Group":
-        return
-
-    # Must be a Seedance generator node in omni_reference mode.
-    name = node.name()
-    if not (name == "Seedance" or re.match(r"^Seedance\d+$", name)):
-        return
-    if "is_seedance_viewer" in node.knobs():
-        return  # Viewer nodes don't auto-expand
-    if "sd_s_mode" not in node.knobs():
-        return
-    try:
-        mode_idx = int(node["sd_s_mode"].value())
-    except Exception:
-        return
-    # mode_idx 3 == SEEDANCE_MODE_OMNI_REF
-    if mode_idx != 3:
-        return
-
-    current = node.inputs()
-    if current <= 0 or current >= 9:
-        return
-
-    # Expand only when ALL current ports have a connection.
-    for i in range(current):
-        if node.input(i) is None:
-            return
-
-    _seedance_expanding_inputs = True
-    try:
-        new_count = current + 1
-        print("[Seedance] Omni auto-expand: {} -> {} ports (all connected)".format(
-            current, new_count))
-        _rebuild_seedance_omni_inputs(node, new_count, preserve_connections=True)
-    finally:
-        _seedance_expanding_inputs = False
+    if not group_node or group_node.Class() != "Group":
+        return None
+    current = group_node.inputs()
+    if current >= 9:
+        return None
+    new_count = current + 1
+    print("[Seedance] Omni manual +1: {} -> {} ports".format(current, new_count))
+    _rebuild_seedance_omni_inputs(group_node, new_count, preserve_connections=True)
+    return new_count
 
 
-# Register the callback once, at module import time, scoped to Group class.
-try:
-    nuke.addKnobChanged(_seedance_input_changed, nodeClass="Group")
-    print("[Seedance] Registered global knobChanged callback for omni auto-expand")
-except Exception as _e:
-    print("[Seedance] Failed to register knobChanged callback: {}".format(_e))
+def seedance_omni_remove_input(group_node):
+    """Remove the HIGHEST-numbered img input port (imgN) from a Seedance omni_reference group.
+
+    IMPORTANT port mapping (see _rebuild_seedance_omni_inputs):
+        label imgN (rightmost on node, highest number) -> outer port 0
+        label img1 (leftmost on node)                  -> outer port (count-1)
+
+    So "Remove Last" (= remove imgN, the one the user just added) means we must
+    inspect ``group_node.input(0)`` — not ``input(count-1)`` — before deleting.
+
+    Refuses to remove when:
+      - current count <= 1 (must keep at least img1)
+      - imgN (= outer port 0) is connected (don't silently drop a user link)
+
+    Returns the new port count, or None if the operation was skipped.
+    """
+    if not group_node or group_node.Class() != "Group":
+        return None
+    current = group_node.inputs()
+    if current <= 1:
+        return None
+    # imgN is always mapped to outer port 0 (see _rebuild_seedance_omni_inputs).
+    if group_node.input(0) is not None:
+        nuke.message(
+            "Cannot remove img{n}: it is connected.\n"
+            "Disconnect img{n} first, then click '- Remove Last'.".format(n=current)
+        )
+        return None
+    new_count = current - 1
+    print("[Seedance] Omni manual -1: {} -> {} ports (removed img{})".format(
+        current, new_count, current))
+    _rebuild_seedance_omni_inputs(group_node, new_count, preserve_connections=True)
+    return new_count

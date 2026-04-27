@@ -81,6 +81,8 @@ from ai_workflow.seedance_nodes import (  # noqa: F401
     _next_seedance_name,
     _create_seedance_group_inputs,
     create_seedance_node,
+    seedance_omni_add_input,
+    seedance_omni_remove_input,
     # Constants re-exported for backward compatibility
     SEEDANCE_MODE_TEXT, SEEDANCE_MODE_IMAGE, SEEDANCE_MODE_FRAMES,
     SEEDANCE_MODE_OMNI_REF, SEEDANCE_MODE_VIDEO_EXTEND, SEEDANCE_MODE_AUDIO_DRIVE,
@@ -650,6 +652,17 @@ class SeedanceWidget(QtWidgets.QWidget):
         self._build_ui()
         self._restore_all_state_from_node()
 
+        # Poll the Seedance group's input state so the "+ Add / - Remove / N/9"
+        # UI in Omni Reference mode reflects DAG changes made by the user
+        # (connecting or disconnecting pipes) without any explicit callback.
+        # Lightweight: reads node.inputs() + node.input(0) and only updates
+        # when the cached signature changes.
+        self._omni_last_sig = None
+        self._omni_poll_timer = QtCore.QTimer(self)
+        self._omni_poll_timer.setInterval(500)
+        self._omni_poll_timer.timeout.connect(self._poll_omni_port_state)
+        self._omni_poll_timer.start()
+
     def _build_ui(self):
         main = QtWidgets.QVBoxLayout(self)
         main.setSpacing(8)
@@ -832,9 +845,9 @@ class SeedanceWidget(QtWidgets.QWidget):
 
         # Image input hint (images come from Group Input nodes, like VEO Ingredients)
         img_hint = QtWidgets.QLabel(
-            "Images: Connect upstream Read/Writer nodes to the 9 inputs on the left.\n"
-            "Input1=1(@image1) ... Input9=9(@image9)\n"
-            "Use @image1~@image9 in your prompt to reference each input."
+            "Images: Connect upstream Read/Writer nodes to the inputs on the left.\n"
+            "Use @image1~@image9 in your prompt to reference each input.\n"
+            "Add or remove input ports with the buttons below."
         )
         img_hint.setStyleSheet(
             "color: #4fc3f7; font-size: 11px; background: #1a2332;"
@@ -842,6 +855,45 @@ class SeedanceWidget(QtWidgets.QWidget):
         )
         img_hint.setWordWrap(True)
         omni_layout.addWidget(img_hint)
+
+        # --- Image input port count controls (+ / -) ---
+        ports_row = QtWidgets.QHBoxLayout()
+        ports_row.setContentsMargins(0, 2, 0, 2)
+        ports_row.setSpacing(6)
+
+        ports_label = QtWidgets.QLabel("Image inputs:")
+        ports_label.setStyleSheet("color: #ccc; font-size: 12px; font-weight: bold;")
+        ports_row.addWidget(ports_label)
+
+        self._omni_port_count_lbl = QtWidgets.QLabel("1 / 9")
+        self._omni_port_count_lbl.setStyleSheet(
+            "color: #ff9800; font-size: 12px; font-weight: bold;"
+            " padding: 2px 8px; background: #2a2a2a; border-radius: 3px;"
+        )
+        self._omni_port_count_lbl.setMinimumWidth(52)
+        self._omni_port_count_lbl.setAlignment(QtCore.Qt.AlignCenter)
+        ports_row.addWidget(self._omni_port_count_lbl)
+
+        self._omni_add_btn = QtWidgets.QPushButton("+ Add")
+        self._omni_add_btn.setObjectName("secondaryBtn")
+        self._omni_add_btn.setToolTip(
+            "Add one more image input port (img2..img9).\n"
+            "A new port appears on the left edge of the node, ready to be connected."
+        )
+        self._omni_add_btn.clicked.connect(self._on_omni_add_input)
+        ports_row.addWidget(self._omni_add_btn)
+
+        self._omni_remove_btn = QtWidgets.QPushButton("- Remove Last")
+        self._omni_remove_btn.setObjectName("secondaryBtn")
+        self._omni_remove_btn.setToolTip(
+            "Remove the last (highest-numbered) image input port.\n"
+            "The port must be unconnected; disconnect it first if needed."
+        )
+        self._omni_remove_btn.clicked.connect(self._on_omni_remove_input)
+        ports_row.addWidget(self._omni_remove_btn)
+
+        ports_row.addStretch()
+        omni_layout.addLayout(ports_row)
 
         # Video references (video1-video3) - still use file browse (not Input)
         vid_group = QtWidgets.QWidget()
@@ -995,6 +1047,8 @@ class SeedanceWidget(QtWidgets.QWidget):
             self._mode_info_lbl.setText(
                 "Omni Ref: Connect up to 9 image inputs on node left edge. Use @image1~@image9 in prompt."
             )
+            # Refresh the port count label for the current node.
+            self._refresh_omni_port_count()
         elif mode == SEEDANCE_MODE_VIDEO_EXTEND:
             self._mode_info_lbl.setText(
                 "Video Extend: Provide a video file to continue generating from its last frame."
@@ -1005,6 +1059,101 @@ class SeedanceWidget(QtWidgets.QWidget):
             )
         else:
             self._mode_info_lbl.setVisible(False)
+
+    # --- Omni Reference: manual port management ---
+
+    def _poll_omni_port_state(self):
+        """Poll the owning Seedance node's port state and refresh the panel
+        when something changes on the DAG (port added/removed, pipe
+        connected/disconnected by the user).
+
+        This drives live updates for the "N / 9" label and "- Remove Last"
+        enable-state without relying on Nuke's knobChanged (which is flaky
+        for PyCustom_Knob-hosted widgets across panel rebuilds).
+        """
+        # Only relevant in Omni Reference mode; skip otherwise to keep cheap.
+        try:
+            if self._get_current_mode() != SEEDANCE_MODE_OMNI_REF:
+                return
+        except Exception:
+            return
+
+        node = self._get_owner_node()
+        if not node:
+            return
+        try:
+            count = int(node.inputs())
+            # Signature: (count, tuple of bools is-connected per port).
+            conn_flags = tuple(
+                (node.input(i) is not None) for i in range(count)
+            )
+            sig = (count, conn_flags)
+        except Exception:
+            return
+
+        if sig == self._omni_last_sig:
+            return
+        self._omni_last_sig = sig
+        self._refresh_omni_port_count()
+
+
+
+    def _refresh_omni_port_count(self):
+        """Update the 'N / 9' label and enable/disable +/- buttons.
+
+        Port mapping reminder (see seedance_nodes._rebuild_seedance_omni_inputs):
+            imgN (rightmost, last-added) -> outer port 0
+            img1 (leftmost)              -> outer port (count-1)
+
+        "Remove Last" targets imgN, so its enable-state depends on input(0).
+        """
+        node = self._get_owner_node()
+        if not node or not hasattr(self, "_omni_port_count_lbl"):
+            return
+        current = int(node.inputs())
+        self._omni_port_count_lbl.setText("{} / 9".format(current))
+        if hasattr(self, "_omni_add_btn"):
+            self._omni_add_btn.setEnabled(current < 9)
+        if hasattr(self, "_omni_remove_btn"):
+            # imgN (the port we'd remove) lives at outer index 0.
+            imgN_connected = (current > 0 and node.input(0) is not None)
+            can_remove = (current > 1 and not imgN_connected)
+            self._omni_remove_btn.setEnabled(can_remove)
+            if current > 1 and imgN_connected:
+                self._omni_remove_btn.setToolTip(
+                    "img{} is currently connected.\n"
+                    "Disconnect img{} (rightmost port on the node) first, "
+                    "then this button will activate.".format(current, current)
+                )
+            else:
+                self._omni_remove_btn.setToolTip(
+                    "Remove the last (highest-numbered) image input port.\n"
+                    "The port must be unconnected; disconnect it first if needed."
+                )
+
+    def _on_omni_add_input(self):
+        """Handle '+ Add' button: add one more img input port."""
+        node = self._get_owner_node()
+        if not node:
+            return
+        if self._get_current_mode() != SEEDANCE_MODE_OMNI_REF:
+            return
+        new_count = seedance_omni_add_input(node)
+        if new_count is not None:
+            print("[Seedance] UI: added port, total = {}".format(new_count))
+        self._refresh_omni_port_count()
+
+    def _on_omni_remove_input(self):
+        """Handle '- Remove Last' button: remove last img input port."""
+        node = self._get_owner_node()
+        if not node:
+            return
+        if self._get_current_mode() != SEEDANCE_MODE_OMNI_REF:
+            return
+        new_count = seedance_omni_remove_input(node)
+        if new_count is not None:
+            print("[Seedance] UI: removed port, total = {}".format(new_count))
+        self._refresh_omni_port_count()
 
     def _browse_media_path(self):
         """Browse for video/audio file."""
@@ -1064,14 +1213,34 @@ class SeedanceWidget(QtWidgets.QWidget):
         }
         names = _INPUT_NAMES.get(mode, [])
 
-        # Omni Reference uses DYNAMIC expansion: don't create all 9 ports upfront
-        # (they're visually cramped and confusing). Instead start with (connected+1)
-        # or 1, and let the global knobChanged callback auto-expand as the user
-        # connects inputs from the left side of the node.
+        # Omni Reference uses MANUAL port management via "+ Add" / "- Remove"
+        # buttons on the panel. Don't create all 9 ports upfront (they're
+        # visually cramped and hard to target).
+        #
+        # When entering omni_reference mode from a DIFFERENT mode, initialize
+        # to (connected + 1) or 1 ports — just enough for the user to start
+        # connecting. If we're already in omni mode (re-entering, e.g. on
+        # restore), preserve whatever port count the user already set.
         is_omni_layout = (mode == SEEDANCE_MODE_OMNI_REF)
         if is_omni_layout:
-            existing_connected = sum(1 for i in range(node.inputs()) if node.input(i) is not None)
-            needed = max(1, min(existing_connected + 1, 9))
+            # Detect existing img* ports inside the group.
+            node.begin()
+            try:
+                inner_inputs = list(nuke.allNodes("Input"))
+            finally:
+                node.end()
+            has_img_ports = any(
+                re.match(r"^img\d+$", n.name()) for n in inner_inputs
+            )
+            if has_img_ports:
+                # Already in omni layout — keep the user's chosen port count.
+                needed = len([n for n in inner_inputs if re.match(r"^img\d+$", n.name())])
+                needed = max(1, min(needed, 9))
+            else:
+                existing_connected = sum(
+                    1 for i in range(node.inputs()) if node.input(i) is not None
+                )
+                needed = max(1, min(existing_connected + 1, 9))
             names = names[:needed]
 
         # Use VEO-style fixed spacing=200 for ALL modes. Smaller xpos gaps (e.g.
