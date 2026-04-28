@@ -92,6 +92,64 @@ from ai_workflow.seedance_nodes import (  # noqa: F401
 import nuke
 import nukescripts
 import os
+import weakref
+
+
+# ---------------------------------------------------------------------------
+# Global registry + onScriptSave hook
+#
+# Nuke saves the .nk by snapshotting knob values at the moment Save is
+# triggered. Our UI state lives on plain Qt widgets (QLineEdit/QComboBox/...),
+# so unless we mirror everything into the hidden knobs *before* the save
+# happens, re-opening the script restores empty/stale values.
+#
+# `_SEEDANCE_LIVE_WIDGETS` tracks every SeedanceWidget instance that is
+# currently alive in the session. The `_seedance_flush_all_to_knobs` callback
+# (wired below via nuke.addOnScriptSave / addOnScriptClose) iterates the
+# registry and asks each widget to flush its state into its node's hidden
+# knobs right before Nuke writes the file.
+# ---------------------------------------------------------------------------
+_SEEDANCE_LIVE_WIDGETS = weakref.WeakSet()
+_SEEDANCE_SAVE_HOOK_INSTALLED = False
+
+
+def _seedance_flush_all_to_knobs():
+    """Called by Nuke before saving / closing a script. Iterates every live
+    SeedanceWidget and flushes its UI state into the owning node's hidden
+    knobs so the values survive a reopen.
+    """
+    try:
+        dead = []
+        for w in list(_SEEDANCE_LIVE_WIDGETS):
+            try:
+                w._save_all_state_to_node()
+            except RuntimeError:
+                # Underlying C++ object deleted -> drop it.
+                dead.append(w)
+            except Exception as e:
+                print("[Seedance] flush failed: {}".format(e))
+        for w in dead:
+            try:
+                _SEEDANCE_LIVE_WIDGETS.discard(w)
+            except Exception:
+                pass
+    except Exception as e:
+        print("[Seedance] _seedance_flush_all_to_knobs error: {}".format(e))
+
+
+def _seedance_install_save_hook():
+    """Register onScriptSave / onScriptClose exactly once per session."""
+    global _SEEDANCE_SAVE_HOOK_INSTALLED
+    if _SEEDANCE_SAVE_HOOK_INSTALLED:
+        return
+    try:
+        nuke.addOnScriptSave(_seedance_flush_all_to_knobs)
+        nuke.addOnScriptClose(_seedance_flush_all_to_knobs)
+        _SEEDANCE_SAVE_HOOK_INSTALLED = True
+        print("[Seedance] onScriptSave/Close hook installed")
+    except Exception as e:
+        print("[Seedance] install save hook failed: {}".format(e))
+
 import json
 import tempfile
 import time
@@ -630,6 +688,21 @@ class SeedanceWorker(QtCore.QThread):
 # ---------------------------------------------------------------------------
 # Seedance Main Widget (embedded in Seedance_Generate node)
 # ---------------------------------------------------------------------------
+class _ClickableLabel(QtWidgets.QLabel):
+    """QLabel that emits `clicked` on left mouse release.
+
+    Used for the Omni Reference thumbnail cards — clicking the image opens
+    the underlying file with the OS default handler.
+    """
+
+    clicked = QtCore.Signal()
+
+    def mouseReleaseEvent(self, event):  # noqa: N802 (Qt API name)
+        if event.button() == QtCore.Qt.LeftButton and self.isEnabled():
+            self.clicked.emit()
+        super(_ClickableLabel, self).mouseReleaseEvent(event)
+
+
 class SeedanceWidget(QtWidgets.QWidget):
     """Custom Qt widget embedded inside the Seedance_Generate node."""
 
@@ -663,6 +736,16 @@ class SeedanceWidget(QtWidgets.QWidget):
         self._omni_poll_timer.setInterval(500)
         self._omni_poll_timer.timeout.connect(self._poll_omni_port_state)
         self._omni_poll_timer.start()
+
+        # Register this widget so the global onScriptSave hook can flush
+        # its UI state into hidden knobs right before Nuke writes the .nk
+        # file. Without this, values typed/selected in the panel would be
+        # lost on reopen because Nuke only persists knob values.
+        try:
+            _SEEDANCE_LIVE_WIDGETS.add(self)
+            _seedance_install_save_hook()
+        except Exception as e:
+            print("[Seedance] register live widget failed: {}".format(e))
 
     def _build_ui(self):
         main = QtWidgets.QVBoxLayout(self)
@@ -933,16 +1016,17 @@ class SeedanceWidget(QtWidgets.QWidget):
             self._omni_video_edits.append(edit)
         omni_layout.addWidget(vid_group)
 
-        # Preview list for video refs (shown only for non-empty paths).
+        # Preview cards for video refs (thumbnails, shown for non-empty paths).
         self._omni_video_preview_container = QtWidgets.QWidget()
-        vpl = QtWidgets.QVBoxLayout(self._omni_video_preview_container)
-        vpl.setContentsMargins(14, 0, 0, 2)
-        vpl.setSpacing(2)
-        self._omni_video_preview_rows = []
+        vpl = QtWidgets.QHBoxLayout(self._omni_video_preview_container)
+        vpl.setContentsMargins(14, 4, 0, 4)
+        vpl.setSpacing(6)
+        self._omni_video_preview_cards = []
         for i in range(1, 4):
-            row = self._build_omni_preview_row(idx=i, ref_type="video")
-            vpl.addWidget(row["widget"])
-            self._omni_video_preview_rows.append(row)
+            card = self._build_omni_preview_card(idx=i, ref_type="video")
+            vpl.addWidget(card["widget"])
+            self._omni_video_preview_cards.append(card)
+        vpl.addStretch(1)
         omni_layout.addWidget(self._omni_video_preview_container)
 
         # Audio references (audio1-audio3) - still use file browse
@@ -980,17 +1064,18 @@ class SeedanceWidget(QtWidgets.QWidget):
 
         # Preview list for audio refs (shown only for non-empty paths).
         self._omni_audio_preview_container = QtWidgets.QWidget()
-        apl = QtWidgets.QVBoxLayout(self._omni_audio_preview_container)
-        apl.setContentsMargins(14, 0, 0, 2)
-        apl.setSpacing(2)
-        self._omni_audio_preview_rows = []
+        apl = QtWidgets.QHBoxLayout(self._omni_audio_preview_container)
+        apl.setContentsMargins(14, 4, 0, 4)
+        apl.setSpacing(6)
+        self._omni_audio_preview_cards = []
         for i in range(1, 4):
-            row = self._build_omni_preview_row(idx=i, ref_type="audio")
-            apl.addWidget(row["widget"])
-            self._omni_audio_preview_rows.append(row)
+            card = self._build_omni_preview_card(idx=i, ref_type="audio")
+            apl.addWidget(card["widget"])
+            self._omni_audio_preview_cards.append(card)
+        apl.addStretch(1)
         omni_layout.addWidget(self._omni_audio_preview_container)
 
-        # Prime the preview rows (all empty initially -> all hidden).
+        # Prime the preview cards (all empty initially -> all hidden).
         self._refresh_omni_previews()
 
         self._omni_container.setVisible(False)
@@ -1264,93 +1349,343 @@ class SeedanceWidget(QtWidgets.QWidget):
                 print("[Seedance] set @audio{} = {}".format(idx, path))
 
     # ------------------------------------------------------------------ #
-    # Omni reference preview rows                                         #
+    # Omni reference preview cards (thumbnail grid)                       #
     # ------------------------------------------------------------------ #
-    def _build_omni_preview_row(self, idx, ref_type):
-        """Build one preview row: [icon] name [Open] [X]. Hidden when empty."""
-        icon = "V" if ref_type == "video" else "A"
-        w = QtWidgets.QWidget()
-        hl = QtWidgets.QHBoxLayout(w)
-        hl.setContentsMargins(0, 0, 0, 0)
-        hl.setSpacing(6)
+    _OMNI_CARD_W = 128
+    _OMNI_CARD_THUMB_H = 72
 
-        tag = QtWidgets.QLabel("[{} @{}{}]".format(icon, ref_type, idx))
-        tag.setStyleSheet(
-            "color: #888; font-size: 10px; font-family: Consolas,monospace;"
+    def _build_omni_preview_card(self, idx, ref_type):
+        """Build a thumbnail card: image area (clickable=Open) + caption +
+        tiny [x] clear badge. Hidden when the slot is empty.
+        """
+        # One-time: ensure QToolTip is readable under Nuke's dark theme
+        # (default QSS may render it as black-on-black -> looks like a
+        # solid black rectangle on hover).
+        if not getattr(SeedanceWidget, "_omni_tooltip_style_injected", False):
+            try:
+                app = QtWidgets.QApplication.instance()
+                if app is not None:
+                    existing = app.styleSheet() or ""
+                    tip_qss = (
+                        "QToolTip { color: #f0f0f0; background-color: #2b2b2b;"
+                        " border: 1px solid #555; padding: 3px 6px;"
+                        " border-radius: 3px; opacity: 230; }"
+                    )
+                    if "QToolTip" not in existing:
+                        app.setStyleSheet(existing + "\n" + tip_qss)
+                SeedanceWidget._omni_tooltip_style_injected = True
+            except Exception:
+                pass
+
+        cw, th = self._OMNI_CARD_W, self._OMNI_CARD_THUMB_H
+        card = QtWidgets.QFrame()
+        card.setFixedWidth(cw)
+        card.setStyleSheet(
+            "QFrame { background: #1f1f1f; border: 1px solid #333;"
+            " border-radius: 4px; }"
+            "QFrame:hover { border-color: #5a8dee; }"
+        )
+        v = QtWidgets.QVBoxLayout(card)
+        v.setContentsMargins(3, 3, 3, 3)
+        v.setSpacing(2)
+
+        # --- Thumbnail area (ClickableLabel) ---
+        thumb = _ClickableLabel()
+        thumb.setFixedSize(cw - 6, th)
+        thumb.setAlignment(QtCore.Qt.AlignCenter)
+        thumb.setStyleSheet(
+            "background: #0d0d0d; border-radius: 3px; color: #888;"
+            " font-size: 10px;"
+        )
+        thumb.setCursor(QtCore.Qt.PointingHandCursor)
+        thumb.setToolTip("Click to open")
+        thumb.clicked.connect(
+            lambda i=idx, t=ref_type: self._open_omni_ref(i, t)
         )
 
-        name_lbl = QtWidgets.QLabel("")
-        name_lbl.setStyleSheet("color: #cfd8dc; font-size: 11px;")
-        name_lbl.setTextInteractionFlags(
-            QtCore.Qt.TextSelectableByMouse
+        # Clear badge overlaid on the top-right of the thumbnail.
+        clear_btn = QtWidgets.QPushButton("x", thumb)
+        clear_btn.setFixedSize(16, 16)
+        clear_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        clear_btn.setStyleSheet(
+            "QPushButton { background: rgba(0,0,0,0.65); color: #fff;"
+            " border: 1px solid #555; border-radius: 8px;"
+            " font-size: 10px; font-weight: bold; padding: 0; }"
+            "QPushButton:hover { background: #c62828; border-color: #c62828; }"
         )
-        name_lbl.setToolTip("")
-        # Elide long names so the row never overflows.
-        try:
-            name_lbl.setSizePolicy(
-                QtWidgets.QSizePolicy.Ignored,
-                QtWidgets.QSizePolicy.Preferred,
-            )
-        except Exception:
-            pass
-
-        open_btn = QtWidgets.QPushButton("Open")
-        open_btn.setFixedHeight(20)
-        open_btn.setObjectName("secondaryBtn")
-        open_btn.setToolTip("Open this file with the system's default app")
-        open_btn.clicked.connect(
-            lambda *args, i=idx, t=ref_type: self._open_omni_ref(i, t)
-        )
-
-        clear_btn = QtWidgets.QPushButton("x")
-        clear_btn.setFixedSize(20, 20)
-        clear_btn.setObjectName("secondaryBtn")
         clear_btn.setToolTip("Remove this reference")
         clear_btn.clicked.connect(
             lambda *args, i=idx, t=ref_type: self._clear_omni_ref(i, t)
         )
+        clear_btn.move(cw - 6 - 16 - 2, 2)
+        clear_btn.raise_()
 
-        hl.addWidget(tag)
-        hl.addWidget(name_lbl, 1)
-        hl.addWidget(open_btn)
-        hl.addWidget(clear_btn)
-        w.setVisible(False)
-        return {"widget": w, "name": name_lbl, "open": open_btn}
+        # --- Caption row: @slot + filename ---
+        tag_txt = "@{}{}".format(ref_type, idx)
+        tag = QtWidgets.QLabel(tag_txt)
+        tag.setStyleSheet(
+            "color: #7aa2f7; font-size: 10px;"
+            " font-family: Consolas,monospace; background: transparent;"
+            " border: none;"
+        )
+
+        name_lbl = QtWidgets.QLabel("")
+        name_lbl.setStyleSheet(
+            "color: #cfd8dc; font-size: 10px; background: transparent;"
+            " border: none;"
+        )
+        name_lbl.setToolTip("")
+        # Elide long filenames inside the fixed card width.
+        name_lbl.setSizePolicy(
+            QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred
+        )
+
+        v.addWidget(thumb)
+        v.addWidget(tag)
+        v.addWidget(name_lbl)
+
+        card.setVisible(False)
+        return {
+            "widget": card,
+            "thumb": thumb,
+            "name": name_lbl,
+            "tag": tag,
+            "clear": clear_btn,
+            "idx": idx,
+            "ref_type": ref_type,
+            "last_path": None,
+        }
 
     def _refresh_omni_previews(self, *_args):
-        """Sync preview rows with the current @video/@audio edit paths."""
-        def _apply(edits, rows):
+        """Sync preview cards with the current @video/@audio edit paths."""
+        def _apply(edits, cards):
             for i, edit in enumerate(edits):
-                if i >= len(rows):
+                if i >= len(cards):
                     break
-                row = rows[i]
+                card = cards[i]
                 path = (edit.text() or "").strip()
                 if not path:
-                    row["widget"].setVisible(False)
-                    row["name"].setText("")
-                    row["name"].setToolTip("")
+                    card["widget"].setVisible(False)
+                    card["name"].setText("")
+                    card["name"].setToolTip("")
+                    card["thumb"].setPixmap(QtGui.QPixmap())
+                    card["thumb"].setText("")
+                    card["last_path"] = None
                     continue
+
                 base = os.path.basename(path) or path
                 exists = os.path.exists(path)
-                color = "#cfd8dc" if exists else "#e57373"
-                suffix = "" if exists else "  (missing)"
-                row["name"].setStyleSheet(
-                    "color: {}; font-size: 11px;".format(color)
+                # Elide filename to fit card width (~ _OMNI_CARD_W - padding).
+                fm = card["name"].fontMetrics()
+                elided = fm.elidedText(
+                    base, QtCore.Qt.ElideMiddle, self._OMNI_CARD_W - 10
                 )
-                row["name"].setText(base + suffix)
-                row["name"].setToolTip(path)
-                row["open"].setEnabled(exists)
-                row["widget"].setVisible(True)
+                if not exists:
+                    elided += "  (missing)"
+                    card["name"].setStyleSheet(
+                        "color: #e57373; font-size: 10px;"
+                        " background: transparent; border: none;"
+                    )
+                else:
+                    card["name"].setStyleSheet(
+                        "color: #cfd8dc; font-size: 10px;"
+                        " background: transparent; border: none;"
+                    )
+                card["name"].setText(elided)
+                card["name"].setToolTip(path)
+                card["widget"].setVisible(True)
+                card["thumb"].setEnabled(exists)
+
+                # Only (re)render thumbnail when the path actually changed
+                # to avoid re-invoking ffmpeg on every textChanged tick.
+                if card["last_path"] != path:
+                    card["last_path"] = path
+                    self._render_card_thumbnail(card, path, exists)
 
         _apply(
             getattr(self, "_omni_video_edits", []),
-            getattr(self, "_omni_video_preview_rows", []),
+            getattr(self, "_omni_video_preview_cards", []),
         )
         _apply(
             getattr(self, "_omni_audio_edits", []),
-            getattr(self, "_omni_audio_preview_rows", []),
+            getattr(self, "_omni_audio_preview_cards", []),
         )
 
+    def _render_card_thumbnail(self, card, path, exists):
+        """Populate card's thumbnail. Videos -> ffmpeg first-frame (cached);
+        audio -> painted placeholder. Falls back to icon text if anything
+        goes wrong so the card never ends up blank.
+        """
+        thumb = card["thumb"]
+        tw = thumb.width()
+        th = thumb.height()
+        ref_type = card["ref_type"]
+
+        if not exists:
+            thumb.setPixmap(QtGui.QPixmap())
+            thumb.setText("missing")
+            thumb.setStyleSheet(
+                "background: #2a1414; border-radius: 3px; color: #e57373;"
+                " font-size: 10px;"
+            )
+            return
+
+        if ref_type == "video":
+            pix = self._get_video_thumb_cached(path, tw, th)
+            if pix and not pix.isNull():
+                thumb.setPixmap(pix)
+                thumb.setText("")
+                thumb.setStyleSheet(
+                    "background: #000; border-radius: 3px;"
+                )
+                return
+            # Fallback: painted play-triangle placeholder.
+            thumb.setPixmap(self._make_placeholder_pixmap(tw, th, "video"))
+            thumb.setText("")
+            thumb.setStyleSheet("background: #000; border-radius: 3px;")
+            return
+
+        # Audio: always painted placeholder (no visual frame to extract).
+        thumb.setPixmap(self._make_placeholder_pixmap(tw, th, "audio"))
+        thumb.setText("")
+        thumb.setStyleSheet("background: #000; border-radius: 3px;")
+
+    # -- thumbnail cache helpers --------------------------------------- #
+    def _get_video_thumb_cached(self, video_path, target_w, target_h):
+        """Return a cached QPixmap thumbnail (first frame) or None."""
+        if not video_path or not os.path.isfile(video_path):
+            return None
+        try:
+            mtime = int(os.path.getmtime(video_path))
+        except OSError:
+            mtime = 0
+        key = "{}|{}|{}x{}".format(video_path, mtime, target_w, target_h)
+        cache = getattr(self, "_omni_thumb_cache", None)
+        if cache is None:
+            cache = {}
+            self._omni_thumb_cache = cache
+        if key in cache:
+            return cache[key]
+
+        # Disk cache so reopening a Nuke script doesn't re-invoke ffmpeg.
+        import hashlib
+        h = hashlib.md5(key.encode("utf-8", "ignore")).hexdigest()
+        cache_dir = os.path.join(tempfile.gettempdir(), "seedance_thumbs")
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+        except Exception:
+            pass
+        disk_path = os.path.join(cache_dir, h + ".jpg")
+
+        pix = None
+        if os.path.isfile(disk_path):
+            pix = QtGui.QPixmap(disk_path)
+            if pix.isNull():
+                pix = None
+
+        if pix is None:
+            pix = self._extract_video_first_frame(
+                video_path, target_w, target_h, disk_path
+            )
+
+        if pix is not None and not pix.isNull():
+            cache[key] = pix
+        return pix
+
+    def _extract_video_first_frame(self, video_path, tw, th, out_path):
+        """ffmpeg -> JPEG at *out_path*, return scaled QPixmap (or None)."""
+        ffmpeg = _find_ffmpeg()
+        if not ffmpeg:
+            return None
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-ss", "0",
+            "-i", video_path,
+            "-vframes", "1",
+            "-q:v", "3",
+            "-vf", "scale={}:-2".format(max(tw * 2, 256)),
+            out_path,
+        ]
+        try:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+                creationflags=(
+                    subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+                ),
+            )
+            if result.returncode != 0 or not os.path.isfile(out_path):
+                return None
+            pix = QtGui.QPixmap(out_path)
+            if pix.isNull():
+                return None
+            return pix.scaled(
+                tw, th,
+                QtCore.Qt.KeepAspectRatioByExpanding,
+                QtCore.Qt.SmoothTransformation,
+            )
+        except Exception as e:
+            print("[Seedance] ffmpeg thumb failed: {}".format(e))
+            return None
+
+    def _make_placeholder_pixmap(self, tw, th, kind):
+        """Paint a simple icon placeholder for video/audio when no thumb."""
+        pm = QtGui.QPixmap(tw, th)
+        pm.fill(QtGui.QColor("#101418"))
+        painter = QtGui.QPainter(pm)
+        try:
+            painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+            if kind == "video":
+                # Centered play triangle.
+                painter.setPen(QtCore.Qt.NoPen)
+                painter.setBrush(QtGui.QColor("#5a8dee"))
+                cx, cy = tw / 2.0, th / 2.0
+                r = min(tw, th) * 0.28
+                tri = QtGui.QPolygonF([
+                    QtCore.QPointF(cx - r * 0.6, cy - r),
+                    QtCore.QPointF(cx - r * 0.6, cy + r),
+                    QtCore.QPointF(cx + r * 0.9, cy),
+                ])
+                painter.drawPolygon(tri)
+                painter.setPen(QtGui.QPen(QtGui.QColor("#667"), 1))
+                painter.setFont(QtGui.QFont("", 8))
+                painter.drawText(
+                    QtCore.QRect(0, th - 14, tw, 12),
+                    QtCore.Qt.AlignCenter,
+                    "VIDEO",
+                )
+            else:  # audio
+                # Stylized waveform bars.
+                painter.setPen(QtCore.Qt.NoPen)
+                painter.setBrush(QtGui.QColor("#a277ff"))
+                bars = [0.4, 0.7, 0.5, 0.9, 0.6, 0.8, 0.35, 0.75, 0.55]
+                bar_w = tw / (len(bars) * 2.0)
+                gap = bar_w
+                x = (tw - (len(bars) * (bar_w + gap) - gap)) / 2.0
+                for h in bars:
+                    bh = th * 0.55 * h
+                    painter.drawRoundedRect(
+                        QtCore.QRectF(x, (th - bh) / 2.0, bar_w, bh),
+                        1.5, 1.5,
+                    )
+                    x += bar_w + gap
+                painter.setPen(QtGui.QPen(QtGui.QColor("#667"), 1))
+                painter.setFont(QtGui.QFont("", 8))
+                painter.drawText(
+                    QtCore.QRect(0, th - 14, tw, 12),
+                    QtCore.Qt.AlignCenter,
+                    "AUDIO",
+                )
+        finally:
+            painter.end()
+        return pm
+
+    # ------------------------------------------------------------------ #
+    # Ref slot operations                                                 #
+    # ------------------------------------------------------------------ #
     def _open_omni_ref(self, idx, ref_type):
         """Open the referenced file with the OS default application."""
         edits = (
